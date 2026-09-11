@@ -41,18 +41,26 @@ DEVICE_WAIT_TIMEOUT = 10.0
 NEGOTIATE_RETRIES = 3
 PORTAL_RESTART_SETTLE_SECONDS = 1.5
 TRANSIENT_ERROR_SIGNATURE = "unable to open /proc"
-"""Substring of a known xdg-desktop-portal 1.22 bug: CreateSession fails
-with AccessDenied ("Portal operation not allowed: Unable to open
-/proc/<pid>/root") because the portal's own caller-identification code
-trips over itself -- confirmed system-wide (polkit-kde-authentication-agent
-hits the identical error registering with the portal), and confirmed NOT
-self-clearing: the base xdg-desktop-portal.service process gets wedged into
-this state and stays there -- retrying the same call against the same
-still-wedged process just fails identically every time, no matter the
-delay. Restarting that --user systemd unit (the base portal, not the
-KDE-specific backend -- the "register app ID" wording in the polkit failure
-points at the base portal's own app-info code) is what actually clears it;
-D-Bus activation brings it straight back for the retry that follows."""
+"""Substring of a portal error where CreateSession fails with AccessDenied
+("Portal operation not allowed: Unable to open /proc/<pid>/root") because
+the base portal's caller-identification code can't read the caller's own
+/proc/<pid>/root. This has two distinct causes, and only one of them is
+this app's to work around here:
+
+1. The calling process itself is unreadable via /proc/<pid>/root to other
+   processes -- e.g. it descends from a setuid re-exec (`newgrp`/`sudo`/
+   `su`). This is a kernel security property of *this* process, permanent
+   for its whole lifetime, and no amount of retrying or restarting the
+   portal fixes it: the portal was never broken, the caller was unreadable.
+   ClickyClick used to trigger exactly this on itself with a `newgrp`-based
+   self-relaunch; that mechanism is gone now (see the README), so this
+   should no longer happen in practice.
+2. A genuine, occasional xdg-desktop-portal-side hiccup, most plausible
+   very early after the portal itself starts (observed once, system-wide,
+   from polkit-kde-authentication-agent, at the exact boot moment
+   xdg-desktop-portal.service was still starting). This kind *is* cleared
+   by restarting the --user systemd unit, which is what the retry below
+   does -- cheap, and harmless if it's actually cause 1 and doesn't help."""
 DEVICE_SETTLE_SECONDS = 1.5
 """How long to keep draining EIS events after both required devices have
 resumed. The compositor resumes multiple devices (absolute pointer, relative

@@ -57,7 +57,7 @@ Needs your user in the `input` group to read the keyboard directly — same requ
 sudo usermod -aG input $USER
 ```
 
-**No logout needed either way.** Group membership normally only takes effect for a fresh login, but ClickyClick checks for this itself on every launch (including right after the automatic fix above succeeds) and, if the group was granted but isn't active yet for the current process, transparently relaunches itself through `newgrp input` — a few hundred milliseconds before its window even appears, not a separate step you have to take.
+**Log out and back in afterward, once.** Group membership only takes effect for a fresh login. An earlier version of this app tried to skip that by relaunching itself through `newgrp input` instead — don't do this: `newgrp` (like `sudo`/`su`) is a setuid binary, and Linux marks any process that transitioned privilege through one as unreadable via `/proc/<pid>/root` to other processes for the rest of its life, no matter how the group change itself is undone or reapplied. The RemoteDesktop portal needs to read exactly that to identify the caller, so a `newgrp`-relaunched ClickyClick can request the group fix successfully and then have every future click session fail with a D-Bus `AccessDenied` — restarting portal services doesn't help, since the process asking is the one that's unreadable, not the portal. One real logout avoids this entirely.
 
 ## Macros
 

@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 import getpass
-import grp
 import json
-import os
 import queue
-import shlex
 import signal
 import subprocess
-import sys
 import threading
 import tkinter as tk
 import webbrowser
@@ -35,49 +31,6 @@ ABOUT_URL = "https://www.erased.no"
 
 HOTKEY_CONFIG_PATH = Path.home() / ".config" / "clickyclick" / "hotkey.json"
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.png"
-
-
-def _input_group_status():
-    """'active' (this process can already read /dev/input/event* -- the
-    `input` group is in its current credentials), 'pending' (the user is
-    listed as a member in /etc/group, e.g. from a just-completed pkexec
-    fix, but *this* process's credentials predate that and haven't picked
-    it up), or 'absent' (not a member at all yet, needs the pkexec fix
-    first).
-
-    The active/pending distinction matters because group membership is
-    cached per-process at login and isn't re-read from /etc/group by
-    already-running processes -- only 'pending' can be resolved by
-    relaunching (see _relaunch_via_newgrp), not by waiting or retrying.
-    """
-    try:
-        input_group = grp.getgrnam("input")
-    except KeyError:
-        return "absent"  # no such group on this system at all
-    # newgrp switches the real/effective gid rather than adding to the
-    # supplementary-groups list -- file permission checks honor either, so
-    # this has to check both to recognize a newgrp-relaunched process as
-    # already active.
-    active_gids = set(os.getgroups()) | {os.getgid(), os.getegid()}
-    if input_group.gr_gid in active_gids:
-        return "active"
-    if getpass.getuser() in input_group.gr_mem:
-        return "pending"
-    return "absent"
-
-
-def _relaunch_via_newgrp():
-    """Re-exec this process through `newgrp input`, so an `input` group
-    membership that's already in /etc/group takes effect immediately for
-    a fresh process -- without the full desktop logout that would
-    otherwise be needed for any *already-running* process (including a
-    brand new one launched the normal way) to pick it up. Never returns on
-    success: it replaces this process's image outright, the same process
-    ID, just running `newgrp` (which then runs Python again) instead of
-    Python directly.
-    """
-    command = " ".join(shlex.quote(a) for a in [sys.executable] + sys.argv)
-    os.execvp("newgrp", ["newgrp", "input", "-c", command])
 
 
 class ClickyClickApp:
@@ -709,15 +662,12 @@ class ClickyClickApp:
             messagebox.showerror("Timed out", "The permission prompt timed out or wasn't answered.")
             return
         if result.returncode == 0:
-            restart_now = messagebox.askyesno(
+            messagebox.showinfo(
                 "Done",
                 "Your user was added to the 'input' group.\n\n"
-                "This needs a fresh process to take effect -- not a full "
-                "logout, just this app restarting. Restart ClickyClick now?",
+                "Log out and back in for this to take effect, then try "
+                "again.",
             )
-            if restart_now:
-                self.on_close()
-                _relaunch_via_newgrp()
         else:
             messagebox.showerror(
                 "Couldn't add to group",
@@ -744,9 +694,6 @@ class ClickyClickApp:
 
 
 def main():
-    if _input_group_status() == "pending":
-        _relaunch_via_newgrp()
-        return  # unreachable on success: execvp replaced this process
     root = tk.Tk()
     app = ClickyClickApp(root)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
