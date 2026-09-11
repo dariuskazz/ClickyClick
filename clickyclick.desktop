@@ -3,6 +3,6 @@ Type=Application
 Name=ClickyClick
 Comment=Configurable automatic mouse clicker
 Exec=/home/darius/ClickyClick/run.sh
-Icon=input-mouse
+Icon=/home/darius/ClickyClick/assets/icon.png
 Terminal=false
 Categories=Utility;Game;
