@@ -6,7 +6,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from clicker_backend import BackendUnavailable, ClickBackend
+from input_backend import BackendUnavailable, InputBackend
 
 INPUT_GROUP_FIX_MSG = (
     "Couldn't open the virtual input device.\n\n"
@@ -57,7 +57,7 @@ class ClickyClickApp:
         self.backend = None
         self._backend_error = None
         try:
-            self.backend = ClickBackend(self.screen_w, self.screen_h)
+            self.backend = InputBackend(self.screen_w, self.screen_h)
         except BackendUnavailable as exc:
             self._backend_error = str(exc)
 
