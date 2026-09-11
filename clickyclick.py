@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-import getpass
 import json
 import queue
 import signal
-import subprocess
 import threading
 import tkinter as tk
 import webbrowser
@@ -12,10 +10,11 @@ from tkinter import messagebox, simpledialog, ttk
 
 from evdev import ecodes as e
 
-from hotkey import HotkeyCapture, HotkeyError, HotkeyListener, HotkeyPermissionError, format_combo, list_keyboards
+from hotkey import HotkeyCapture, HotkeyError, HotkeyListener, format_combo
 from input_backend import BackendUnavailable, InputBackend
 from macro import Macro, MacroError, MacroPlayer
-from recorder import MacroRecorder, RecorderError, RecorderPermissionError, list_candidate_devices
+from privileged_input import PrivilegedInputError, PrivilegedInputSource
+from recorder import MacroRecorder
 
 BACKEND_ERROR_MSG_TEMPLATE = (
     "Couldn't set up a RemoteDesktop session with the compositor:\n\n"
@@ -69,6 +68,7 @@ class ClickyClickApp:
         except BackendUnavailable as exc:
             self._backend_error = str(exc)
 
+        self._privileged_input = None
         self.hotkey_listener = None
         self.hotkey_combo = None  # (frozenset of modifier names, evdev key code)
         self._hotkey_capture = None
@@ -184,6 +184,17 @@ class ClickyClickApp:
         # the process) so a plain `kill`/`pkill` still quits the app normally.
         signal.signal(signal.SIGUSR1, lambda signum, frame: self._ui_queue.put(("toggle", None)))
 
+    def _ensure_privileged_input(self):
+        """Lazily starts the shared root-privileged input reader (see
+        privileged_input.py) on first use by either the hotkey or macro
+        feature, and reuses it for the rest of this run -- at most one
+        pkexec password prompt per launch, covering both features, never a
+        logout. Raises PrivilegedInputError if pkexec was cancelled or
+        failed."""
+        if self._privileged_input is None:
+            self._privileged_input = PrivilegedInputSource()
+        return self._privileged_input
+
     def _load_and_start_hotkey(self):
         try:
             data = json.loads(HOTKEY_CONFIG_PATH.read_text())
@@ -193,23 +204,20 @@ class ClickyClickApp:
         try:
             self._start_hotkey_listener(combo)
         except HotkeyError:
-            pass  # e.g. input-group permission revoked since last run; Settings shows "Not set"
+            pass  # e.g. the pkexec prompt was cancelled; Settings shows "Not set"
 
     def _start_hotkey_listener(self, combo):
         """combo: (frozenset of modifier names, evdev key code). Raises
-        HotkeyError if no keyboard device could be opened."""
+        HotkeyError if the privileged input source couldn't be started."""
         if self.hotkey_listener is not None:
             self.hotkey_listener.close()
             self.hotkey_listener = None
-        keyboards = list_keyboards()
-        if not keyboards:
-            raise HotkeyError("no keyboard input device found")
+        try:
+            source = self._ensure_privileged_input()
+        except PrivilegedInputError as exc:
+            raise HotkeyError(str(exc)) from exc
         modifiers, key_code = combo
-        listener = HotkeyListener(
-            keyboards[0], modifiers, key_code, on_triggered=self._on_hotkey_triggered
-        )
-        for extra in keyboards[1:]:
-            extra.close()
+        listener = HotkeyListener(source, modifiers, key_code, on_triggered=self._on_hotkey_triggered)
         listener.start()
         self.hotkey_listener = listener
         self.hotkey_combo = combo
@@ -415,21 +423,13 @@ class ClickyClickApp:
 
     def _on_set_hotkey(self):
         try:
-            keyboards = list_keyboards()
-        except HotkeyPermissionError as exc:
-            self._offer_input_group_fix(str(exc))
-            return
-        except HotkeyError as exc:
+            source = self._ensure_privileged_input()
+        except PrivilegedInputError as exc:
             messagebox.showerror("Can't set hotkey", str(exc))
             return
-        if not keyboards:
-            messagebox.showerror("Can't set hotkey", "No keyboard input device found.")
-            return
-        for extra in keyboards[1:]:
-            extra.close()
         self._set_hotkey_btn.config(state="disabled")
         self._hotkey_status_var.set("Press your desired key combination… (Esc to cancel)")
-        self._hotkey_capture = HotkeyCapture(keyboards[0])
+        self._hotkey_capture = HotkeyCapture(source)
         self._hotkey_capture.start()
         self._poll_hotkey_capture()
 
@@ -517,24 +517,18 @@ class ClickyClickApp:
             if not messagebox.askyesno("Overwrite?", f"A macro named {name!r} already exists. Overwrite it?"):
                 return
         try:
-            mice, keyboards = list_candidate_devices()
-        except RecorderPermissionError as exc:
-            self._offer_input_group_fix(str(exc))
-            return
-        except RecorderError as exc:
+            source = self._ensure_privileged_input()
+        except PrivilegedInputError as exc:
             messagebox.showerror("Can't record", str(exc))
             return
-        if not mice or not keyboards:
-            messagebox.showerror("Can't record", "No mouse and/or keyboard input device found to record from.")
-            return
 
-        self._recorder = MacroRecorder(mice[0], keyboards[0], self.root.winfo_pointerxy)
+        self._recorder = MacroRecorder(source, self.root.winfo_pointerxy)
         self._recorder.start()
         self._recording = True
         self._pending_macro_name = name
         self._record_btn.config(state="disabled")
         self._play_btn.config(state="disabled")
-        self._macro_status_var.set(f"Recording from {mice[0].name!r} / {keyboards[0].name!r}… press F9 to stop.")
+        self._macro_status_var.set("Recording… press F9 to stop.")
         self._poll_recorder()
 
     def _poll_recorder(self):
@@ -627,54 +621,6 @@ class ClickyClickApp:
             "ClickyClick — setup needed", BACKEND_ERROR_MSG_TEMPLATE.format(error=self._backend_error)
         )
 
-    def _offer_input_group_fix(self, detail):
-        """Offer to run `usermod -aG input <user>` via a graphical polkit
-        prompt (pkexec) instead of just telling the user to type it into a
-        terminal themselves. The actual privilege escalation and password
-        entry happens in pkexec's own native dialog -- this app never sees
-        the password, only whether pkexec's child process succeeded."""
-        proceed = messagebox.askyesno(
-            "Permission needed",
-            "ClickyClick needs to read your keyboard/mouse for hotkeys and "
-            "macro recording, which requires your user to be in the "
-            "'input' group (a one-time system change).\n\n"
-            "Add your user to the 'input' group now? A password prompt "
-            "will appear.\n\n"
-            f"({detail})",
-        )
-        if not proceed:
-            return
-        try:
-            result = subprocess.run(
-                ["pkexec", "usermod", "-aG", "input", getpass.getuser()],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        except FileNotFoundError:
-            messagebox.showerror(
-                "Can't run pkexec",
-                "pkexec isn't available on this system. Run this yourself "
-                "in a terminal:\n\n  sudo usermod -aG input $USER",
-            )
-            return
-        except subprocess.TimeoutExpired:
-            messagebox.showerror("Timed out", "The permission prompt timed out or wasn't answered.")
-            return
-        if result.returncode == 0:
-            messagebox.showinfo(
-                "Done",
-                "Your user was added to the 'input' group.\n\n"
-                "Log out and back in for this to take effect, then try "
-                "again.",
-            )
-        else:
-            messagebox.showerror(
-                "Couldn't add to group",
-                "The password prompt was cancelled or failed.\n\n"
-                + (result.stderr.strip() or "Run this yourself in a terminal:\n\n  sudo usermod -aG input $USER"),
-            )
-
     def on_close(self):
         self._stop_event.set()
         self._macro_stop_event.set()
@@ -688,6 +634,8 @@ class ClickyClickApp:
             self._hotkey_capture.cancel()
         if self.hotkey_listener is not None:
             self.hotkey_listener.close()
+        if self._privileged_input is not None:
+            self._privileged_input.close()
         if self.backend:
             self.backend.close()
         self.root.destroy()
