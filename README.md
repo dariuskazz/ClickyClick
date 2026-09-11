@@ -57,7 +57,7 @@ Needs your user in the `input` group to read the keyboard directly — same requ
 sudo usermod -aG input $USER
 ```
 
-Either way, log out and back in afterward for it to take effect.
+**No logout needed either way.** Group membership normally only takes effect for a fresh login, but ClickyClick checks for this itself on every launch (including right after the automatic fix above succeeds) and, if the group was granted but isn't active yet for the current process, transparently relaunches itself through `newgrp input` — a few hundred milliseconds before its window even appears, not a separate step you have to take.
 
 ## Macros
 
