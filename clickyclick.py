@@ -15,7 +15,7 @@ INPUT_GROUP_FIX_MSG = (
     "on Wayland.\n\n"
     "Fix (one-time):\n"
     "  sudo usermod -aG input $USER\n\n"
-    "Then log out and back in, and relaunch Auto Clicker."
+    "Then log out and back in, and relaunch ClickyClick."
 )
 
 HOTKEY_HELP_MSG = (
@@ -29,17 +29,17 @@ HOTKEY_HELP_MSG = (
     "Setup:\n"
     "1. System Settings -> Shortcuts -> Custom Shortcuts\n"
     "2. Edit -> New -> Global Shortcut -> Command/URL\n"
-    "3. Name it \"Toggle Auto Clicker\"\n"
-    "4. Command:  pkill -USR1 -f autoclicker.py\n"
+    "3. Name it \"Toggle ClickyClick\"\n"
+    "4. Command:  pkill -USR1 -f clickyclick.py\n"
     "5. On the Trigger tab, set your key (e.g. F6)\n\n"
     "That key then toggles Start/Stop from anywhere."
 )
 
 
-class AutoClickerApp:
+class ClickyClickApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Auto Clicker")
+        self.root.title("ClickyClick")
         self.root.resizable(False, False)
 
         self._stop_event = threading.Event()
@@ -331,7 +331,7 @@ class AutoClickerApp:
 
     # ---------- dialogs ----------
     def _show_backend_error(self):
-        messagebox.showerror("Auto Clicker — setup needed", INPUT_GROUP_FIX_MSG)
+        messagebox.showerror("ClickyClick — setup needed", INPUT_GROUP_FIX_MSG)
 
     def _show_hotkey_help(self):
         messagebox.showinfo("Global Hotkey Setup", HOTKEY_HELP_MSG)
@@ -347,7 +347,7 @@ class AutoClickerApp:
 
 def main():
     root = tk.Tk()
-    app = AutoClickerApp(root)
+    app = ClickyClickApp(root)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
 

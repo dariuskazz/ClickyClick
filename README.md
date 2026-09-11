@@ -1,4 +1,4 @@
-# Auto Clicker
+# ClickyClick
 
 A configurable auto clicker for Linux, built for Wayland (KDE Plasma). Clicks are injected at the kernel level via `uinput`, since X11-style synthetic input (`xdotool`/`pynput`/XTest) is blocked by modern Wayland compositors.
 
@@ -23,7 +23,7 @@ python3 -m venv venv
 ./run.sh
 ```
 
-Or install `autoclicker.desktop` to `~/.local/share/applications/` to launch it from your application menu.
+Or install `clickyclick.desktop` to `~/.local/share/applications/` to launch it from your application menu.
 
 ## Features
 
@@ -39,7 +39,7 @@ Wayland only lets the compositor itself own global key grabs, so this app listen
 
 1. System Settings → Shortcuts → Custom Shortcuts
 2. Edit → New → Global Shortcut → Command/URL
-3. Command: `pkill -USR1 -f autoclicker.py`
+3. Command: `pkill -USR1 -f clickyclick.py`
 4. Set your trigger key on the Trigger tab
 
 (Also shown in-app via the "Global Hotkey Setup…" button.)

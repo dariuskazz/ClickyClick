@@ -8,7 +8,7 @@ is the mechanism that actually works here.
 Requires the running user to have read/write access to /dev/uinput, AND to
 be a member of the `input` group so the compositor can read the resulting
 /dev/input/eventN device node. See BackendUnavailable / the diagnostic
-check in autoclicker.py for the runtime check.
+check in clickyclick.py for the runtime check.
 """
 
 import time
@@ -40,7 +40,7 @@ class ClickBackend:
             ],
         }
         try:
-            self._ui = UInput(capabilities, name="auto-clicker-virtual-pointer")
+            self._ui = UInput(capabilities, name="clickyclick-virtual-pointer")
         except (PermissionError, OSError) as exc:
             raise BackendUnavailable(str(exc)) from exc
         # Give udev/libinput a moment to enumerate the new device before use.

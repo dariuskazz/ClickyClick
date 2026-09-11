@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Auto Clicker
+Name=ClickyClick
 Comment=Configurable automatic mouse clicker
-Exec=/home/darius/auto-clicker/run.sh
+Exec=/home/darius/ClickyClick/run.sh
 Icon=input-mouse
 Terminal=false
 Categories=Utility;Game;
