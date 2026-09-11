@@ -17,6 +17,7 @@ indistinguishable from any other click, and would corrupt the last
 recorded step. The F9 press itself is filtered out of the result.
 """
 
+import glob
 import queue
 import threading
 import time
@@ -38,12 +39,19 @@ def list_candidate_devices():
     """Return (mice, keyboards): evdev.InputDevice lists, classified by
     capability. Raises RecorderError (wrapping the PermissionError) if the
     running user can't read /dev/input/event* -- see the README's
-    `input`-group setup step."""
+    `input`-group setup step.
+
+    Deliberately globs for device paths directly rather than using
+    evdev.list_devices(): that function silently drops any path the
+    calling user can't access (it defaults to requiring both read *and*
+    write, via a plain os.access() check) before returning -- so on a
+    system missing the input-group setup, it always returns an empty
+    list, and a PermissionError from InputDevice() never has a chance to
+    happen at all. That turned "no permission" into a misleading "no mouse
+    or keyboard found" in practice; opening every path ourselves is what
+    actually lets the permission error surface."""
     mice, keyboards = [], []
-    try:
-        paths = evdev.list_devices()
-    except OSError as exc:
-        raise RecorderError(f"couldn't enumerate input devices: {exc}") from exc
+    paths = glob.glob("/dev/input/event*")
     for path in paths:
         try:
             dev = evdev.InputDevice(path)

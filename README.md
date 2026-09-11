@@ -1,6 +1,6 @@
 # ClickyClick
 
-A configurable auto clicker and macro tool for Linux, built for Wayland (KDE Plasma). Clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using the real `libei`/EIS protocol — the same mechanism screen-sharing and remote-control tools use, and the compositor's actual sanctioned channel for this on Wayland. The global start/stop hotkey goes through the separate `GlobalShortcuts` portal, so it works via KDE's own native shortcut system rather than a hand-rolled key grab.
+A configurable auto clicker and macro tool for Linux, built for Wayland (KDE Plasma). Clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using the real `libei`/EIS protocol — the same mechanism screen-sharing and remote-control tools use, and the compositor's actual sanctioned channel for this on Wayland. The global start/stop hotkey, by contrast, is assigned and detected entirely inside this app by reading a keyboard device directly — nothing is ever registered with KDE's shortcut system, so there's nothing left behind when ClickyClick closes.
 
 This isn't the first thing that was tried. `uinput` (what `ydotool` uses) creates a real kernel-level virtual mouse, but KWin accepts synthetic *keyboard* input from it while silently dropping synthetic *pointer* input (clicks and motion) — confirmed by hand, not assumed. X11-style injection (`xdotool`/`pynput`, XTest) is blocked outright on Wayland. The portal's own plain D-Bus methods (`NotifyPointerButton` etc.) also silently no-op on this KWin version. Negotiating a proper portal session and injecting through the real EIS protocol is the one path that actually works.
 
@@ -11,7 +11,7 @@ python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ```
 
-The first launch asks the compositor for permission (a real consent dialog) to inject pointer and keyboard input, and a separate one to register the global hotkey. Approval is remembered — a restore token is saved to `~/.config/clickyclick/restore_token` for the click/keyboard permission — so this normally only happens once.
+The first launch asks the compositor for permission (a real consent dialog) to inject pointer and keyboard input. Approval is remembered — a restore token is saved to `~/.config/clickyclick/restore_token` — so this normally only happens once.
 
 **If no dialog appears and the app reports it couldn't set up a session:** some KDE versions (observed on `xdg-desktop-portal-kde` 6.7.4) have a permission-checking bug ("MegaAuth") that blocks the RemoteDesktop consent dialog before it can show. You'll see this in `journalctl --user` as:
 
@@ -47,16 +47,20 @@ Or install `clickyclick.desktop` to `~/.local/share/applications/` to launch it 
 
 ## Global hotkey
 
-Configured from **Settings → Hotkey**. Clicking "Change Hotkey…" opens KDE's own native shortcut-assignment dialog (via the `GlobalShortcuts` portal) rather than a custom key-recorder built into this app — the same infrastructure KDE's own global shortcuts use, so it's reliable and rebindable from one place. Once assigned, that key toggles Start/Stop from anywhere, including while a game or another window has focus.
+Configured from **Settings → Hotkey**. Click "Set Hotkey…", then press whatever key or combination (e.g. `Ctrl+F6`) you want — captured directly by this app, no KDE dialog involved. Once set, that combination toggles Start/Stop from anywhere, including while a game or another window has focus.
 
-## Macros
+This is deliberately *not* the `GlobalShortcuts` XDG portal (the usual sanctioned way to do this on Wayland): that requires KDE's own native "assign a key" dialog and registers a persistent, app-identified shortcut that shows up in KDE's own Shortcuts settings and outlives the process. Reading a keyboard device directly instead means the whole thing lives only in this app's memory for as long as it's running — closing or killing ClickyClick leaves nothing registered anywhere to revert. Your chosen combination is remembered locally (`~/.config/clickyclick/hotkey.json`, this app's own preference file — not KDE's) so you don't have to reassign it every launch, but re-detecting it each time is a fresh in-process read, not a standing system registration.
 
-Configured from **Settings → Macros**. "Record New…" captures real mouse clicks, movement, and keystrokes as you perform them, until you press **F9** to stop (a dedicated key rather than a clickable button, since a click on a "Stop" button would itself be indistinguishable from any other recorded click). Recorded macros are saved as JSON under `~/.config/clickyclick/macros/` and can be played back with a configurable loop count.
-
-Recording reads raw input devices directly (there's no portal for *observing* general input the way there is for injecting it), which needs your user in the `input` group:
+Needs your user in the `input` group to read the keyboard directly — same requirement as macro recording below, and independent of the click/keyboard injection permission above:
 
 ```bash
 sudo usermod -aG input $USER
 ```
 
-Log out and back in for it to take effect. This is independent of the click/keyboard injection permission above — recording and playback use different mechanisms.
+Log out and back in for it to take effect.
+
+## Macros
+
+Configured from **Settings → Macros**. "Record New…" captures real mouse clicks, movement, and keystrokes as you perform them, until you press **F9** to stop (a dedicated key rather than a clickable button, since a click on a "Stop" button would itself be indistinguishable from any other recorded click). Recorded macros are saved as JSON under `~/.config/clickyclick/macros/` and can be played back with a configurable loop count.
+
+Recording reads raw input devices directly (there's no portal for *observing* general input the way there is for injecting it), which needs the same `input`-group membership as the hotkey above.

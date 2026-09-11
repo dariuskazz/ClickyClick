@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
+import json
 import queue
 import signal
 import threading
 import tkinter as tk
 import webbrowser
+from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
-from global_shortcuts import GlobalShortcuts, GlobalShortcutsError
+from evdev import ecodes as e
+
+from hotkey import HotkeyCapture, HotkeyError, HotkeyListener, format_combo, list_keyboards
 from input_backend import BackendUnavailable, InputBackend
 from macro import Macro, MacroError, MacroPlayer
 from recorder import MacroRecorder, RecorderError, list_candidate_devices
@@ -22,6 +26,8 @@ BACKEND_ERROR_MSG_TEMPLATE = (
 )
 
 ABOUT_URL = "https://www.erased.no"
+
+HOTKEY_CONFIG_PATH = Path.home() / ".config" / "clickyclick" / "hotkey.json"
 
 
 class ClickyClickApp:
@@ -58,13 +64,10 @@ class ClickyClickApp:
         except BackendUnavailable as exc:
             self._backend_error = str(exc)
 
-        self.hotkey = None
-        self.hotkey_trigger = None
-        self._hotkey_error = "Setting up…"
-        # Backgrounded: BindShortcuts can wait on a human seeing and
-        # answering KDE's own assign-a-key dialog (up to a minute), and the
-        # main window shouldn't be frozen/unresponsive for that whole time.
-        threading.Thread(target=self._setup_hotkey_bg, daemon=True).start()
+        self.hotkey_listener = None
+        self.hotkey_combo = None  # (frozenset of modifier names, evdev key code)
+        self._hotkey_capture = None
+        self._load_and_start_hotkey()
 
         self._build_vars()
         self._build_ui()
@@ -176,35 +179,46 @@ class ClickyClickApp:
         # the process) so a plain `kill`/`pkill` still quits the app normally.
         signal.signal(signal.SIGUSR1, lambda signum, frame: self._ui_queue.put(("toggle", None)))
 
-    def _setup_hotkey(self):
-        """Negotiate a GlobalShortcuts session. Returns (hotkey, bound_dict).
-        Raises GlobalShortcutsError on anything going wrong, including a bus
-        connection failure the portal wrapper itself doesn't pre-emptively
-        wrap."""
+    def _load_and_start_hotkey(self):
         try:
-            hotkey = GlobalShortcuts()
-            bound = hotkey.bind(
-                [("toggle", "Toggle ClickyClick Start/Stop")],
-                on_activated=self._on_hotkey_activated,
-            )
-        except GlobalShortcutsError:
-            raise
-        except Exception as exc:
-            raise GlobalShortcutsError(str(exc)) from exc
-        return hotkey, bound
-
-    def _setup_hotkey_bg(self):
-        try:
-            hotkey, bound = self._setup_hotkey()
-        except GlobalShortcutsError as exc:
-            self._ui_queue.put(("hotkey_failed", str(exc)))
+            data = json.loads(HOTKEY_CONFIG_PATH.read_text())
+            combo = (frozenset(data["modifiers"]), data["key_code"])
+        except (OSError, ValueError, KeyError):
             return
-        self.hotkey = hotkey
-        self._ui_queue.put(("hotkey_ready", bound.get("toggle")))
+        try:
+            self._start_hotkey_listener(combo)
+        except HotkeyError:
+            pass  # e.g. input-group permission revoked since last run; Settings shows "Not set"
 
-    def _on_hotkey_activated(self, shortcut_id):
-        if shortcut_id == "toggle":
-            self._toggle_start_stop()
+    def _start_hotkey_listener(self, combo):
+        """combo: (frozenset of modifier names, evdev key code). Raises
+        HotkeyError if no keyboard device could be opened."""
+        if self.hotkey_listener is not None:
+            self.hotkey_listener.close()
+            self.hotkey_listener = None
+        keyboards = list_keyboards()
+        if not keyboards:
+            raise HotkeyError("no keyboard input device found")
+        modifiers, key_code = combo
+        listener = HotkeyListener(
+            keyboards[0], modifiers, key_code, on_triggered=self._on_hotkey_triggered
+        )
+        for extra in keyboards[1:]:
+            extra.close()
+        listener.start()
+        self.hotkey_listener = listener
+        self.hotkey_combo = combo
+
+    def _on_hotkey_triggered(self):
+        # Called from the listener's own background thread -- route through
+        # the same thread-safe queue as every other cross-thread signal.
+        self._ui_queue.put(("toggle", None))
+
+    @staticmethod
+    def _save_hotkey_combo(combo):
+        modifiers, key_code = combo
+        HOTKEY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        HOTKEY_CONFIG_PATH.write_text(json.dumps({"modifiers": sorted(modifiers), "key_code": key_code}))
 
     # ---------- pick location ----------
     def _start_pick_location(self):
@@ -314,11 +328,6 @@ class ClickyClickApp:
 
     # ---------- queue pump (main thread; also keeps signals/hotkey responsive) ----------
     def _pump_queue(self):
-        if self.hotkey is not None:
-            try:
-                self.hotkey.pump()
-            except Exception:
-                pass
         try:
             while True:
                 kind, payload = self._ui_queue.get_nowait()
@@ -339,17 +348,6 @@ class ClickyClickApp:
                         self._play_btn.config(state="normal")
                         self._stop_macro_btn.config(state="disabled")
                         self._macro_status_var.set(f"Stopped after {payload} step(s).")
-                elif kind == "hotkey_ready":
-                    self.hotkey_trigger = payload
-                    self._hotkey_error = None
-                    if self._settings_open():
-                        self._refresh_hotkey_status()
-                elif kind == "hotkey_failed":
-                    self.hotkey = None
-                    self.hotkey_trigger = None
-                    self._hotkey_error = payload
-                    if self._settings_open():
-                        self._refresh_hotkey_status()
         except queue.Empty:
             pass
         self.root.after(50, self._pump_queue)
@@ -392,51 +390,68 @@ class ClickyClickApp:
         ttk.Label(parent, textvariable=self._hotkey_status_var, wraplength=320, justify="left").grid(
             row=1, column=0, sticky="w", pady=(4, 10)
         )
-        ttk.Button(parent, text="Change Hotkey…", command=self._on_change_hotkey).grid(row=2, column=0, sticky="w")
+        self._set_hotkey_btn = ttk.Button(parent, text="Set Hotkey…", command=self._on_set_hotkey)
+        self._set_hotkey_btn.grid(row=2, column=0, sticky="w")
         ttk.Label(
             parent,
-            text="Works even while another window (e.g. a game) has focus. "
-            "Opens KDE's own shortcut configuration dialog.",
+            text="Works even while another window (e.g. a game) has focus. Assigned and "
+            "detected entirely within this app -- nothing is registered with KDE, so "
+            "closing ClickyClick leaves no shortcut behind.",
             foreground="#666666",
             wraplength=320,
             justify="left",
         ).grid(row=3, column=0, sticky="w", pady=(10, 0))
 
     def _refresh_hotkey_status(self):
-        if self.hotkey_trigger:
-            self._hotkey_status_var.set(f"Currently bound to: {self.hotkey_trigger}")
-        elif self._hotkey_error:
-            self._hotkey_status_var.set(f"Not set up ({self._hotkey_error})")
+        if self.hotkey_combo:
+            self._hotkey_status_var.set(f"Currently set to: {format_combo(*self.hotkey_combo)}")
         else:
-            self._hotkey_status_var.set("Not set up.")
+            self._hotkey_status_var.set("Not set.")
 
-    def _on_change_hotkey(self):
-        if self.hotkey is None:
-            try:
-                self.hotkey, bound = self._setup_hotkey()
-            except GlobalShortcutsError as exc:
-                self._hotkey_error = str(exc)
-                self._refresh_hotkey_status()
-                messagebox.showerror("Hotkey setup failed", str(exc))
-                return
-            self.hotkey_trigger = bound.get("toggle")
-            self._hotkey_error = None
-            self._refresh_hotkey_status()
+    def _on_set_hotkey(self):
         try:
-            self.hotkey.reconfigure()
-        except GlobalShortcutsError as exc:
-            messagebox.showerror("Hotkey setup failed", str(exc))
+            keyboards = list_keyboards()
+        except HotkeyError as exc:
+            messagebox.showerror("Can't set hotkey", str(exc))
             return
-        messagebox.showinfo(
-            "Configure Hotkey",
-            "Assign your shortcut in KDE's dialog, then click OK here to refresh.",
-        )
-        try:
-            bound = self.hotkey.list_shortcuts()
-            self.hotkey_trigger = bound.get("toggle")
-        except GlobalShortcutsError:
-            pass
-        self._refresh_hotkey_status()
+        if not keyboards:
+            messagebox.showerror("Can't set hotkey", "No keyboard input device found.")
+            return
+        for extra in keyboards[1:]:
+            extra.close()
+        self._set_hotkey_btn.config(state="disabled")
+        self._hotkey_status_var.set("Press your desired key combination… (Esc to cancel)")
+        self._hotkey_capture = HotkeyCapture(keyboards[0])
+        self._hotkey_capture.start()
+        self._poll_hotkey_capture()
+
+    def _poll_hotkey_capture(self):
+        capture = self._hotkey_capture
+        if capture is None:
+            return
+        result = capture.result
+        if result is None:
+            if self._settings_open():
+                self.root.after(100, self._poll_hotkey_capture)
+            else:
+                capture.cancel()
+                self._hotkey_capture = None
+            return
+        self._hotkey_capture = None
+        capture.close()
+        modifiers, key_code = result
+        if key_code == e.KEY_ESC and not modifiers:
+            self._hotkey_status_var.set("Cancelled.")
+        else:
+            try:
+                self._start_hotkey_listener(result)
+            except HotkeyError as exc:
+                messagebox.showerror("Can't set hotkey", str(exc))
+            else:
+                self._save_hotkey_combo(result)
+        if self._settings_open():
+            self._set_hotkey_btn.config(state="normal")
+            self._refresh_hotkey_status()
 
     # ---- Macros tab ----
     def _build_macros_tab(self, parent):
@@ -610,8 +625,10 @@ class ClickyClickApp:
             self._click_thread.join(timeout=0.5)
         if self._macro_thread and self._macro_thread.is_alive():
             self._macro_thread.join(timeout=0.5)
-        if self.hotkey is not None:
-            self.hotkey.close()
+        if self._hotkey_capture is not None:
+            self._hotkey_capture.cancel()
+        if self.hotkey_listener is not None:
+            self.hotkey_listener.close()
         if self.backend:
             self.backend.close()
         self.root.destroy()
