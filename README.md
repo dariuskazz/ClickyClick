@@ -51,16 +51,16 @@ Configured from **Settings → Hotkey**. Click "Set Hotkey…", then press whate
 
 This is deliberately *not* the `GlobalShortcuts` XDG portal (the usual sanctioned way to do this on Wayland): that requires KDE's own native "assign a key" dialog and registers a persistent, app-identified shortcut that shows up in KDE's own Shortcuts settings and outlives the process. Reading a keyboard device directly instead means the whole thing lives only in this app's memory for as long as it's running — closing or killing ClickyClick leaves nothing registered anywhere to revert. Your chosen combination is remembered locally (`~/.config/clickyclick/hotkey.json`, this app's own preference file — not KDE's) so you don't have to reassign it every launch, but re-detecting it each time is a fresh in-process read, not a standing system registration.
 
-Needs your user in the `input` group to read the keyboard directly — same requirement as macro recording below, and independent of the click/keyboard injection permission above:
+Needs your user in the `input` group to read the keyboard directly — same requirement as macro recording below, and independent of the click/keyboard injection permission above. If you haven't set this up yet, ClickyClick will offer to do it for you the first time you use "Set Hotkey…" or "Record New…" — a Yes/No prompt, then a native password dialog (via `pkexec`; your password goes there, never through the app). Declining, or doing it yourself, both work fine too:
 
 ```bash
 sudo usermod -aG input $USER
 ```
 
-Log out and back in for it to take effect.
+Either way, log out and back in afterward for it to take effect.
 
 ## Macros
 
 Configured from **Settings → Macros**. "Record New…" captures real mouse clicks, movement, and keystrokes as you perform them, until you press **F9** to stop (a dedicated key rather than a clickable button, since a click on a "Stop" button would itself be indistinguishable from any other recorded click). Recorded macros are saved as JSON under `~/.config/clickyclick/macros/` and can be played back with a configurable loop count.
 
-Recording reads raw input devices directly (there's no portal for *observing* general input the way there is for injecting it), which needs the same `input`-group membership as the hotkey above.
+Recording reads raw input devices directly (there's no portal for *observing* general input the way there is for injecting it), which needs the same `input`-group membership as the hotkey above (and offers the same automatic fix).
