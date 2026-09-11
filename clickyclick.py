@@ -34,6 +34,7 @@ BACKEND_ERROR_MSG_TEMPLATE = (
 ABOUT_URL = "https://www.erased.no"
 
 HOTKEY_CONFIG_PATH = Path.home() / ".config" / "clickyclick" / "hotkey.json"
+ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.png"
 
 
 def _input_group_status():
@@ -84,6 +85,8 @@ class ClickyClickApp:
         self.root = root
         self.root.title("ClickyClick")
         self.root.resizable(False, False)
+        self._icon_image = tk.PhotoImage(file=str(ICON_PATH))
+        self.root.iconphoto(True, self._icon_image)
 
         self._stop_event = threading.Event()
         self._click_thread = None
