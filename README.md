@@ -1,21 +1,25 @@
 # ClickyClick
 
-A configurable auto clicker for Linux, built for Wayland (KDE Plasma). Clicks are injected at the kernel level via `uinput`, since X11-style synthetic input (`xdotool`/`pynput`/XTest) is blocked by modern Wayland compositors.
+A configurable auto clicker for Linux, built for Wayland (KDE Plasma). Clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using the real `libei`/EIS protocol — the same mechanism screen-sharing and remote-control tools use, and the compositor's actual sanctioned channel for this on Wayland.
+
+This isn't the first thing that was tried. `uinput` (what `ydotool` uses) creates a real kernel-level virtual mouse, but KWin accepts synthetic *keyboard* input from it while silently dropping synthetic *pointer* input (clicks and motion) — confirmed by hand, not assumed. X11-style injection (`xdotool`/`pynput`, XTest) is blocked outright on Wayland. The portal's own plain D-Bus methods (`NotifyPointerButton` etc.) also silently no-op on this KWin version. Negotiating a proper portal session and injecting through the real EIS protocol is the one path that actually works.
 
 ## Setup
-
-Requires your user to be in the `input` group, so the compositor can read events from the virtual input device this app creates:
-
-```bash
-sudo usermod -aG input $USER
-```
-
-Log out and back in for it to take effect. Then:
 
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ```
+
+The first launch asks the compositor for permission (a real consent dialog) to inject pointer and keyboard input. Approval is remembered — a restore token is saved to `~/.config/clickyclick/restore_token` — so this only happens once.
+
+**If no dialog appears and the app reports it couldn't set up a session:** some KDE versions (observed on `xdg-desktop-portal-kde` 6.7.4) have a permission-checking bug that blocks the dialog before it can show. You'll see this in `journalctl --user` as `MegaAuth: Failed to lookup permissions: "No entry for remote-desktop"`. Run the included one-time fix:
+
+```bash
+./venv/bin/python fix_kde_portal_permission.py
+```
+
+This writes the permission entry directly — the same effect clicking "Allow" would have if the dialog worked. Harmless to run even if you don't hit the bug.
 
 ## Run
 

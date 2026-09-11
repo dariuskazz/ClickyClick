@@ -2,20 +2,19 @@
 import queue
 import signal
 import threading
-import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 from input_backend import BackendUnavailable, InputBackend
 
-INPUT_GROUP_FIX_MSG = (
-    "Couldn't open the virtual input device.\n\n"
-    "This usually means your user isn't in the 'input' group yet, which "
-    "the desktop compositor needs in order to read synthetic mouse events "
-    "on Wayland.\n\n"
-    "Fix (one-time):\n"
-    "  sudo usermod -aG input $USER\n\n"
-    "Then log out and back in, and relaunch ClickyClick."
+BACKEND_ERROR_MSG_TEMPLATE = (
+    "Couldn't set up a RemoteDesktop session with the compositor:\n\n"
+    "{error}\n\n"
+    "If a consent dialog appeared, it needs to be approved. If none "
+    "appeared at all, your KDE version may need the one-time permission-"
+    "store fix described in this project's README (a known bug in KDE's "
+    "portal permission checking for non-Flatpak apps).\n\n"
+    "Relaunch ClickyClick after resolving this."
 )
 
 HOTKEY_HELP_MSG = (
@@ -57,7 +56,7 @@ class ClickyClickApp:
         self.backend = None
         self._backend_error = None
         try:
-            self.backend = InputBackend(self.screen_w, self.screen_h)
+            self.backend = InputBackend()
         except BackendUnavailable as exc:
             self._backend_error = str(exc)
 
@@ -246,21 +245,6 @@ class ClickyClickApp:
             messagebox.showerror("Invalid settings", str(exc))
             return
 
-        if not self._diagnostic_check():
-            proceed = messagebox.askyesno(
-                "Input device check",
-                "The virtual mouse doesn't seem to be moving the cursor. "
-                "This usually means your user isn't in the 'input' group "
-                "yet (needed on Wayland).\n\n"
-                "Fix: sudo usermod -aG input $USER, then log out and back in.\n\n"
-                "Start anyway?",
-            )
-            if not proceed:
-                return
-
-        if cfg["position_mode"] == "fixed":
-            cfg["x"], cfg["y"] = self._prepare_fixed_target(cfg["x"], cfg["y"])
-
         self._stop_event.clear()
         self._running = True
         self.status_var.set("Running")
@@ -275,26 +259,6 @@ class ClickyClickApp:
         if not self._running:
             return
         self._stop_event.set()
-
-    def _diagnostic_check(self):
-        before = self.root.winfo_pointerxy()
-        dx = 12 if before[0] < self.screen_w - 20 else -12
-        dy = 12 if before[1] < self.screen_h - 20 else -12
-        self.backend.move_relative(dx, dy)
-        time.sleep(0.08)
-        mid = self.root.winfo_pointerxy()
-        self.backend.move_relative(-dx, -dy)
-        time.sleep(0.05)
-        return mid != before
-
-    def _prepare_fixed_target(self, x, y):
-        self.backend.move_absolute(x, y)
-        time.sleep(0.08)
-        actual_x, actual_y = self.root.winfo_pointerxy()
-        err_x, err_y = actual_x - x, actual_y - y
-        corrected_x = max(0, min(self.screen_w - 1, x - err_x))
-        corrected_y = max(0, min(self.screen_h - 1, y - err_y))
-        return corrected_x, corrected_y
 
     # ---------- click loop (background thread) ----------
     def _click_loop(self, cfg):
@@ -331,7 +295,9 @@ class ClickyClickApp:
 
     # ---------- dialogs ----------
     def _show_backend_error(self):
-        messagebox.showerror("ClickyClick — setup needed", INPUT_GROUP_FIX_MSG)
+        messagebox.showerror(
+            "ClickyClick — setup needed", BACKEND_ERROR_MSG_TEMPLATE.format(error=self._backend_error)
+        )
 
     def _show_hotkey_help(self):
         messagebox.showinfo("Global Hotkey Setup", HOTKEY_HELP_MSG)

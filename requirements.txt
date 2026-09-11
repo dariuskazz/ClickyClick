@@ -1,1 +1,2 @@
 evdev>=1.6
+python-libei[portal]>=0.5.1

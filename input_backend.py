@@ -1,24 +1,32 @@
-"""Virtual pointer + keyboard backend for Linux, built on uinput (kernel-level input).
+"""Pointer + keyboard input backend for Linux Wayland, via the RemoteDesktop
+XDG portal and the real EIS protocol (``libei``) -- not ``/dev/uinput``.
 
-Works on both X11 and Wayland because it injects events below the display
-server, the same way real hardware would. XTest-style injection (what tools
-like xdotool/pynput use) is blocked by modern Wayland compositors, so this
-is the mechanism that actually works here.
+Why not uinput: confirmed by hand on this system that KWin accepts synthetic
+*keyboard* input from a uinput device but silently drops synthetic *pointer*
+input (both clicks and motion) from one, even with correct permissions --
+likely a deliberate Wayland security boundary around cursor control, since a
+fake pointer can click "Yes" on a consent dialog in a way a fake keyboard
+can't as directly. The portal's own plain D-Bus methods
+(``NotifyPointerButton`` etc.) were tried too and also silently no-op on
+this KWin version. Negotiating the portal session properly and then
+injecting through the real EIS protocol is the one path that actually
+reaches the compositor's input pipeline.
 
-Requires the running user to have read/write access to /dev/uinput, AND to
-be a member of the `input` group so the compositor can read the resulting
-/dev/input/eventN device nodes (both the pointer and the keyboard). See
-BackendUnavailable / the diagnostic check in clickyclick.py for the runtime
-check.
+The first run raises a real consent dialog (or, if this exact system has hit
+the KDE "MegaAuth" permission-lookup bug -- see the project README -- may
+need a one-time manual fix first). Approval is remembered via a restore
+token saved to disk, so normal use after that is silent.
 """
 
+import select
 import time
+from pathlib import Path
 
-from evdev import UInput, AbsInfo, ecodes as e
+from evdev import ecodes as e
+from libei import ei
+from libei.portal import DeviceType, PersistMode, PortalError, RemoteDesktopSession
 
-DOUBLE_CLICK_GAP = 0.09
-PRESS_RELEASE_GAP = 0.012
-KEY_HOLD_GAP = 0.02
+RESTORE_TOKEN_PATH = Path.home() / ".config" / "clickyclick" / "restore_token"
 
 BUTTONS = {
     "left": e.BTN_LEFT,
@@ -26,13 +34,16 @@ BUTTONS = {
     "middle": e.BTN_MIDDLE,
 }
 
-# All KEY_* codes, so the virtual keyboard can emit anything a real one
-# could. Excludes KEY_MAX/KEY_CNT: those are kernel header boundary
-# constants that leak into evdev's code->name table, not real keys — trying
-# to register KEY_CNT (one past the valid array bound) makes uinput reject
-# the whole device with EINVAL.
-_NOT_REAL_KEYS = {"KEY_MAX", "KEY_CNT"}
-ALL_KEY_CODES = [code for code, name in e.KEY.items() if name not in _NOT_REAL_KEYS]
+DOUBLE_CLICK_GAP = 0.09
+PRESS_RELEASE_GAP = 0.02
+DEVICE_WAIT_TIMEOUT = 10.0
+DEVICE_SETTLE_SECONDS = 1.5
+"""How long to keep draining EIS events after both required devices have
+resumed. The compositor resumes multiple devices (absolute pointer, relative
+pointer, keyboard) as a burst; stopping the instant the two this backend
+needs are in hand -- while the burst is still arriving -- has been observed
+to leave the connection in a state where every subsequent event is silently
+dropped. Draining a little longer avoids that."""
 
 
 class BackendUnavailable(RuntimeError):
@@ -40,67 +51,120 @@ class BackendUnavailable(RuntimeError):
 
 
 class InputBackend:
-    def __init__(self, screen_width, screen_height):
-        pointer_capabilities = {
-            e.EV_KEY: list(BUTTONS.values()),
-            e.EV_REL: [e.REL_X, e.REL_Y],
-            e.EV_ABS: [
-                (e.ABS_X, AbsInfo(value=0, min=0, max=max(screen_width - 1, 1), fuzz=0, flat=0, resolution=0)),
-                (e.ABS_Y, AbsInfo(value=0, min=0, max=max(screen_height - 1, 1), fuzz=0, flat=0, resolution=0)),
-            ],
-        }
-        keyboard_capabilities = {
-            e.EV_KEY: ALL_KEY_CODES,
-        }
+    def __init__(self):
+        restore_token = self._load_restore_token()
         try:
-            self._pointer = UInput(pointer_capabilities, name="clickyclick-virtual-pointer")
-            self._keyboard = UInput(keyboard_capabilities, name="clickyclick-virtual-keyboard")
-        except (PermissionError, OSError) as exc:
+            self._session = RemoteDesktopSession.negotiate(
+                devices=DeviceType.POINTER | DeviceType.KEYBOARD,
+                persist_mode=PersistMode.UNTIL_REVOKED,
+                restore_token=restore_token,
+            )
+        except PortalError as exc:
             raise BackendUnavailable(str(exc)) from exc
-        # Give udev/libinput a moment to enumerate the new devices before use.
-        time.sleep(0.3)
+        self._save_restore_token(self._session.restore_token)
+
+        self._sender = ei.Sender.create_for_fd(self._session.eis_fd, name="clickyclick")
+        self._pointer = None
+        self._keyboard = None
+        try:
+            self._wait_for_devices()
+        except Exception as exc:
+            self.close()
+            raise BackendUnavailable(f"EIS device negotiation failed: {exc}") from exc
+        if self._pointer is None or self._keyboard is None:
+            self.close()
+            raise BackendUnavailable(
+                "compositor did not resume an absolute-pointer and keyboard EIS device"
+            )
+        self.regions = self._pointer.regions
+
+    # ---------- setup ----------
+    @staticmethod
+    def _load_restore_token():
+        try:
+            token = RESTORE_TOKEN_PATH.read_text().strip()
+        except OSError:
+            return None
+        return token or None
+
+    @staticmethod
+    def _save_restore_token(token):
+        if not token:
+            return
+        RESTORE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        RESTORE_TOKEN_PATH.write_text(token)
+
+    def _wait_for_devices(self):
+        deadline = time.monotonic() + DEVICE_WAIT_TIMEOUT
+        settle_deadline = None
+        while time.monotonic() < deadline:
+            if self._pointer and self._keyboard and settle_deadline is None:
+                settle_deadline = time.monotonic() + DEVICE_SETTLE_SECONDS
+            if settle_deadline is not None and time.monotonic() > settle_deadline:
+                return
+            select.select([self._sender.fd], [], [], 1)
+            self._sender.dispatch()
+            for event in self._sender.events:
+                if event.event_type == ei.EventType.SEAT_ADDED:
+                    event.seat.bind(
+                        (
+                            ei.DeviceCapability.POINTER_ABSOLUTE,
+                            ei.DeviceCapability.BUTTON,
+                            ei.DeviceCapability.KEYBOARD,
+                        )
+                    )
+                elif event.event_type == ei.EventType.DEVICE_RESUMED:
+                    caps = event.device.capabilities
+                    if ei.DeviceCapability.POINTER_ABSOLUTE in caps and self._pointer is None:
+                        self._pointer = event.device
+                    elif ei.DeviceCapability.KEYBOARD in caps and self._keyboard is None:
+                        self._keyboard = event.device
 
     # ---------- pointer ----------
     def move_absolute(self, x, y):
-        self._pointer.write(e.EV_ABS, e.ABS_X, int(x))
-        self._pointer.write(e.EV_ABS, e.ABS_Y, int(y))
-        self._pointer.syn()
-
-    def move_relative(self, dx, dy):
-        if dx:
-            self._pointer.write(e.EV_REL, e.REL_X, int(dx))
-        if dy:
-            self._pointer.write(e.EV_REL, e.REL_Y, int(dy))
-        self._pointer.syn()
+        self._pointer.start_emulating()
+        self._pointer.pointer_motion_absolute(x, y).frame()
+        self._pointer.stop_emulating()
 
     def click(self, button="left", double=False):
-        code = BUTTONS.get(button, e.BTN_LEFT)
+        code = BUTTONS.get(button, BUTTONS["left"])
         self._press(code)
         if double:
             time.sleep(DOUBLE_CLICK_GAP)
             self._press(code)
 
     def _press(self, code):
-        self._pointer.write(e.EV_KEY, code, 1)
-        self._pointer.syn()
+        self._pointer.start_emulating()
+        self._pointer.button(code, True).frame()
         time.sleep(PRESS_RELEASE_GAP)
-        self._pointer.write(e.EV_KEY, code, 0)
-        self._pointer.syn()
+        self._pointer.button(code, False).frame()
+        self._pointer.stop_emulating()
 
     # ---------- keyboard ----------
     def key_down(self, keycode):
-        self._keyboard.write(e.EV_KEY, keycode, 1)
-        self._keyboard.syn()
+        self._keyboard.start_emulating()
+        self._keyboard.keyboard_key(keycode, True).frame()
 
     def key_up(self, keycode):
-        self._keyboard.write(e.EV_KEY, keycode, 0)
-        self._keyboard.syn()
+        self._keyboard.keyboard_key(keycode, False).frame()
+        self._keyboard.stop_emulating()
 
-    def key_tap(self, keycode, hold=KEY_HOLD_GAP):
+    def key_tap(self, keycode, hold=PRESS_RELEASE_GAP):
         self.key_down(keycode)
         time.sleep(hold)
         self.key_up(keycode)
 
+    # ---------- teardown ----------
     def close(self):
-        self._pointer.close()
-        self._keyboard.close()
+        if self._sender is not None:
+            try:
+                self._sender.disconnect()
+            except Exception:
+                pass
+            self._sender = None
+        if self._session is not None:
+            try:
+                self._session.close()
+            except Exception:
+                pass
+            self._session = None
