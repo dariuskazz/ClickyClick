@@ -19,6 +19,7 @@ token saved to disk, so normal use after that is silent.
 """
 
 import select
+import subprocess
 import time
 from pathlib import Path
 
@@ -38,16 +39,20 @@ DOUBLE_CLICK_GAP = 0.09
 PRESS_RELEASE_GAP = 0.02
 DEVICE_WAIT_TIMEOUT = 10.0
 NEGOTIATE_RETRIES = 3
-NEGOTIATE_RETRY_DELAY = 1.0
+PORTAL_RESTART_SETTLE_SECONDS = 1.5
 TRANSIENT_ERROR_SIGNATURE = "unable to open /proc"
-"""Substring of a known xdg-desktop-portal 1.22 bug: CreateSession
-occasionally fails with AccessDenied ("Portal operation not allowed: Unable
-to open /proc/<pid>/root") because the portal's own caller-identification
-code trips over itself, not because of anything wrong with this app's
-permissions -- confirmed system-wide, since polkit-kde-authentication-agent
-has hit the exact same error registering with the portal. It has always
-been observed to succeed on a prompt retry, so retry a few times before
-surfacing it as a real failure."""
+"""Substring of a known xdg-desktop-portal 1.22 bug: CreateSession fails
+with AccessDenied ("Portal operation not allowed: Unable to open
+/proc/<pid>/root") because the portal's own caller-identification code
+trips over itself -- confirmed system-wide (polkit-kde-authentication-agent
+hits the identical error registering with the portal), and confirmed NOT
+self-clearing: the base xdg-desktop-portal.service process gets wedged into
+this state and stays there -- retrying the same call against the same
+still-wedged process just fails identically every time, no matter the
+delay. Restarting that --user systemd unit (the base portal, not the
+KDE-specific backend -- the "register app ID" wording in the polkit failure
+points at the base portal's own app-info code) is what actually clears it;
+D-Bus activation brings it straight back for the retry that follows."""
 DEVICE_SETTLE_SECONDS = 1.5
 """How long to keep draining EIS events after both required devices have
 resumed. The compositor resumes multiple devices (absolute pointer, relative
@@ -59,6 +64,22 @@ dropped. Draining a little longer avoids that."""
 
 class BackendUnavailable(RuntimeError):
     pass
+
+
+def _restart_base_portal():
+    """Best-effort bounce of the base portal daemon -- see
+    TRANSIENT_ERROR_SIGNATURE for why this, not the KDE-specific backend, is
+    the one that needs restarting. Swallows failures: this is one recovery
+    attempt inside a retry loop, so if it doesn't work the loop's own error
+    handling (or the next iteration) is what surfaces the problem."""
+    try:
+        subprocess.run(
+            ["systemctl", "--user", "restart", "xdg-desktop-portal.service"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 class InputBackend:
@@ -99,7 +120,8 @@ class InputBackend:
                 is_last = attempt == NEGOTIATE_RETRIES - 1
                 if TRANSIENT_ERROR_SIGNATURE not in str(exc).lower() or is_last:
                     raise
-                time.sleep(NEGOTIATE_RETRY_DELAY)
+                _restart_base_portal()
+                time.sleep(PORTAL_RESTART_SETTLE_SECONDS)
 
     @staticmethod
     def _load_restore_token():
