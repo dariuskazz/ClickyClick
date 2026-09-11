@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Auto Clicker
+Comment=Configurable automatic mouse clicker
+Exec=/home/darius/auto-clicker/run.sh
+Icon=input-mouse
+Terminal=false
+Categories=Utility;Game;
