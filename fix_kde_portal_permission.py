@@ -9,8 +9,15 @@ hangs. The portal's own log shows this as:
 
     MegaAuth: Failed to lookup permissions: "No entry for remote-desktop"
 
-This script writes the permission entry directly -- the same effect
-"Allow" in a working dialog would have. Run it once:
+Per KDE's own developer docs (develop.kde.org/docs/administration/portal-permissions/),
+this is a real, documented pre-authorization table -- normally set with
+`flatpak permission-set kde-authorized remote-desktop <app_id> yes`. A plain
+(non-Flatpak, non-systemd-launched) script like this one has no app_id the
+portal can derive, which the same docs say falls back to the empty string.
+
+This script writes that entry directly with the flatpak CLI's own semantics
+(table `kde-authorized`, id `remote-desktop`, app_id `""`) -- the same
+effect "Allow" in a working dialog would have. Run it once:
 
     ./venv/bin/python fix_kde_portal_permission.py
 
@@ -27,7 +34,7 @@ from gi.repository import Gio, GLib
 BUS = "org.freedesktop.impl.portal.PermissionStore"
 PATH = "/org/freedesktop/impl/portal/PermissionStore"
 IFACE = "org.freedesktop.impl.portal.PermissionStore"
-TABLE = "xdp-kde-remotedesktop"
+TABLE = "kde-authorized"
 RESOURCE_ID = "remote-desktop"
 
 
@@ -59,7 +66,7 @@ def main():
         "Set",
         GLib.Variant(
             "(sbsa{sas}v)",
-            (TABLE, True, RESOURCE_ID, {"": ["yes"], "*": ["yes"]}, GLib.Variant("b", True)),
+            (TABLE, True, RESOURCE_ID, {"": ["yes"]}, GLib.Variant("b", True)),
         ),
         None,
         Gio.DBusCallFlags.NONE,

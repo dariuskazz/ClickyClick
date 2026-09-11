@@ -3,9 +3,13 @@ import queue
 import signal
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+import webbrowser
+from tkinter import messagebox, simpledialog, ttk
 
+from global_shortcuts import GlobalShortcuts, GlobalShortcutsError
 from input_backend import BackendUnavailable, InputBackend
+from macro import Macro, MacroError, MacroPlayer
+from recorder import MacroRecorder, RecorderError, list_candidate_devices
 
 BACKEND_ERROR_MSG_TEMPLATE = (
     "Couldn't set up a RemoteDesktop session with the compositor:\n\n"
@@ -17,22 +21,7 @@ BACKEND_ERROR_MSG_TEMPLATE = (
     "Relaunch ClickyClick after resolving this."
 )
 
-HOTKEY_HELP_MSG = (
-    "In-app hotkeys (work while this window has focus):\n"
-    "  F6   Start / Stop\n"
-    "  Esc  Stop\n\n"
-    "Global hotkey (works even while another window, e.g. a game, has "
-    "focus):\n\n"
-    "KDE can bind a key to a system-wide command via Custom Shortcuts; "
-    "this app listens for the signal that sends.\n\n"
-    "Setup:\n"
-    "1. System Settings -> Shortcuts -> Custom Shortcuts\n"
-    "2. Edit -> New -> Global Shortcut -> Command/URL\n"
-    "3. Name it \"Toggle ClickyClick\"\n"
-    "4. Command:  pkill -USR1 -f clickyclick.py\n"
-    "5. On the Trigger tab, set your key (e.g. F6)\n\n"
-    "That key then toggles Start/Stop from anywhere."
-)
+ABOUT_URL = "https://www.erased.no"
 
 
 class ClickyClickApp:
@@ -45,6 +34,15 @@ class ClickyClickApp:
         self._click_thread = None
         self._ui_queue = queue.Queue()
         self._running = False
+
+        self._macro_stop_event = threading.Event()
+        self._macro_thread = None
+        self._macro_running = False
+        self._recorder = None
+        self._recording = False
+        self._pending_macro_name = None
+
+        self._settings_win = None
 
         # Installed before backend/UI setup so the global-hotkey signal is
         # handled from the earliest possible moment after launch.
@@ -59,6 +57,14 @@ class ClickyClickApp:
             self.backend = InputBackend()
         except BackendUnavailable as exc:
             self._backend_error = str(exc)
+
+        self.hotkey = None
+        self.hotkey_trigger = None
+        self._hotkey_error = "Setting up…"
+        # Backgrounded: BindShortcuts can wait on a human seeing and
+        # answering KDE's own assign-a-key dialog (up to a minute), and the
+        # main window shouldn't be frozen/unresponsive for that whole time.
+        threading.Thread(target=self._setup_hotkey_bg, daemon=True).start()
 
         self._build_vars()
         self._build_ui()
@@ -88,7 +94,7 @@ class ClickyClickApp:
         self.count_var = tk.StringVar(value="Clicks: 0")
         self.pick_status_var = tk.StringVar(value="")
 
-    # ---------- UI ----------
+    # ---------- main window UI ----------
     def _build_ui(self):
         pad = {"padx": 8, "pady": 6}
         main = ttk.Frame(self.root, padding=10)
@@ -153,23 +159,52 @@ class ClickyClickApp:
 
         btn_frame = ttk.Frame(main)
         btn_frame.grid(row=5, column=0, sticky="ew", **pad)
-        self.start_btn = ttk.Button(btn_frame, text="Start (F6)", command=self._on_start_clicked)
-        self.start_btn.grid(row=0, column=0, padx=4, sticky="ew")
-        self.stop_btn = ttk.Button(btn_frame, text="Stop (Esc)", command=self._on_stop_clicked, state="disabled")
-        self.stop_btn.grid(row=0, column=1, padx=4, sticky="ew")
-        ttk.Button(btn_frame, text="Global Hotkey Setup…", command=self._show_hotkey_help).grid(
-            row=0, column=2, padx=4, sticky="ew"
-        )
-        btn_frame.columnconfigure((0, 1, 2), weight=1)
+        self.toggle_btn = ttk.Button(btn_frame, text="Start", command=self._toggle_start_stop)
+        self.toggle_btn.grid(row=0, column=0, padx=4, sticky="ew")
+        ttk.Button(btn_frame, text="Settings…", command=self._open_settings).grid(row=0, column=1, padx=4, sticky="ew")
+        btn_frame.columnconfigure((0, 1), weight=1)
 
+        # In-window convenience bindings; the same physical action (button or
+        # key) both starts and stops. The global hotkey configured in
+        # Settings does the same thing regardless of window focus.
         self.root.bind("<F6>", lambda ev: self._toggle_start_stop())
-        self.root.bind("<Escape>", lambda ev: self._on_stop_clicked())
+        self.root.bind("<Escape>", lambda ev: self._toggle_start_stop())
 
     # ---------- signal / hotkey plumbing ----------
     def _install_signal_handlers(self):
         # SIGTERM is deliberately left at its default disposition (terminate
         # the process) so a plain `kill`/`pkill` still quits the app normally.
         signal.signal(signal.SIGUSR1, lambda signum, frame: self._ui_queue.put(("toggle", None)))
+
+    def _setup_hotkey(self):
+        """Negotiate a GlobalShortcuts session. Returns (hotkey, bound_dict).
+        Raises GlobalShortcutsError on anything going wrong, including a bus
+        connection failure the portal wrapper itself doesn't pre-emptively
+        wrap."""
+        try:
+            hotkey = GlobalShortcuts()
+            bound = hotkey.bind(
+                [("toggle", "Toggle ClickyClick Start/Stop")],
+                on_activated=self._on_hotkey_activated,
+            )
+        except GlobalShortcutsError:
+            raise
+        except Exception as exc:
+            raise GlobalShortcutsError(str(exc)) from exc
+        return hotkey, bound
+
+    def _setup_hotkey_bg(self):
+        try:
+            hotkey, bound = self._setup_hotkey()
+        except GlobalShortcutsError as exc:
+            self._ui_queue.put(("hotkey_failed", str(exc)))
+            return
+        self.hotkey = hotkey
+        self._ui_queue.put(("hotkey_ready", bound.get("toggle")))
+
+    def _on_hotkey_activated(self, shortcut_id):
+        if shortcut_id == "toggle":
+            self._toggle_start_stop()
 
     # ---------- pick location ----------
     def _start_pick_location(self):
@@ -185,7 +220,7 @@ class ClickyClickApp:
         self.pick_status_var.set(f"Move mouse to target… capturing in {seconds_left}")
         self.root.after(1000, self._pick_countdown, seconds_left - 1)
 
-    # ---------- start / stop ----------
+    # ---------- start / stop (Simple Click) ----------
     def _toggle_start_stop(self):
         if self._running:
             self._on_stop_clicked()
@@ -239,6 +274,9 @@ class ClickyClickApp:
         if self.backend is None:
             self._show_backend_error()
             return
+        if self._macro_running:
+            messagebox.showerror("Busy", "Stop the running macro before starting Simple Click.")
+            return
         try:
             cfg = self._validate_and_build_config()
         except ValueError as exc:
@@ -248,8 +286,7 @@ class ClickyClickApp:
         self._stop_event.clear()
         self._running = True
         self.status_var.set("Running")
-        self.start_btn.config(state="disabled")
-        self.stop_btn.config(state="normal")
+        self.toggle_btn.config(text="Stop")
         self.count_var.set("Clicks: 0")
 
         self._click_thread = threading.Thread(target=self._click_loop, args=(cfg,), daemon=True)
@@ -275,8 +312,13 @@ class ClickyClickApp:
                 break
         self._ui_queue.put(("stopped", None))
 
-    # ---------- queue pump (main thread; also keeps signals responsive) ----------
+    # ---------- queue pump (main thread; also keeps signals/hotkey responsive) ----------
     def _pump_queue(self):
+        if self.hotkey is not None:
+            try:
+                self.hotkey.pump()
+            except Exception:
+                pass
         try:
             while True:
                 kind, payload = self._ui_queue.get_nowait()
@@ -285,13 +327,273 @@ class ClickyClickApp:
                 elif kind == "stopped":
                     self._running = False
                     self.status_var.set("Idle")
-                    self.start_btn.config(state="normal")
-                    self.stop_btn.config(state="disabled")
+                    self.toggle_btn.config(text="Start")
                 elif kind == "toggle":
                     self._toggle_start_stop()
+                elif kind == "macro_step":
+                    if self._settings_open():
+                        self._macro_status_var.set(f"Playing… {payload} step(s) done.")
+                elif kind == "macro_stopped":
+                    self._macro_running = False
+                    if self._settings_open():
+                        self._play_btn.config(state="normal")
+                        self._stop_macro_btn.config(state="disabled")
+                        self._macro_status_var.set(f"Stopped after {payload} step(s).")
+                elif kind == "hotkey_ready":
+                    self.hotkey_trigger = payload
+                    self._hotkey_error = None
+                    if self._settings_open():
+                        self._refresh_hotkey_status()
+                elif kind == "hotkey_failed":
+                    self.hotkey = None
+                    self.hotkey_trigger = None
+                    self._hotkey_error = payload
+                    if self._settings_open():
+                        self._refresh_hotkey_status()
         except queue.Empty:
             pass
         self.root.after(50, self._pump_queue)
+
+    # ---------- Settings window ----------
+    def _settings_open(self):
+        return self._settings_win is not None and self._settings_win.winfo_exists()
+
+    def _open_settings(self):
+        if self._settings_open():
+            self._settings_win.lift()
+            return
+        win = tk.Toplevel(self.root)
+        win.title("ClickyClick Settings")
+        win.resizable(False, False)
+        self._settings_win = win
+
+        notebook = ttk.Notebook(win)
+        notebook.pack(fill="both", expand=True, padx=8, pady=8)
+
+        hotkey_tab = ttk.Frame(notebook, padding=12)
+        notebook.add(hotkey_tab, text="Hotkey")
+        self._build_hotkey_tab(hotkey_tab)
+
+        macros_tab = ttk.Frame(notebook, padding=12)
+        notebook.add(macros_tab, text="Macros")
+        self._build_macros_tab(macros_tab)
+
+        about_tab = ttk.Frame(notebook, padding=12)
+        notebook.add(about_tab, text="About")
+        self._build_about_tab(about_tab)
+
+    # ---- Hotkey tab ----
+    def _build_hotkey_tab(self, parent):
+        ttk.Label(parent, text="Global start/stop shortcut", font=("", 10, "bold")).grid(
+            row=0, column=0, sticky="w"
+        )
+        self._hotkey_status_var = tk.StringVar()
+        self._refresh_hotkey_status()
+        ttk.Label(parent, textvariable=self._hotkey_status_var, wraplength=320, justify="left").grid(
+            row=1, column=0, sticky="w", pady=(4, 10)
+        )
+        ttk.Button(parent, text="Change Hotkey…", command=self._on_change_hotkey).grid(row=2, column=0, sticky="w")
+        ttk.Label(
+            parent,
+            text="Works even while another window (e.g. a game) has focus. "
+            "Opens KDE's own shortcut configuration dialog.",
+            foreground="#666666",
+            wraplength=320,
+            justify="left",
+        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+
+    def _refresh_hotkey_status(self):
+        if self.hotkey_trigger:
+            self._hotkey_status_var.set(f"Currently bound to: {self.hotkey_trigger}")
+        elif self._hotkey_error:
+            self._hotkey_status_var.set(f"Not set up ({self._hotkey_error})")
+        else:
+            self._hotkey_status_var.set("Not set up.")
+
+    def _on_change_hotkey(self):
+        if self.hotkey is None:
+            try:
+                self.hotkey, bound = self._setup_hotkey()
+            except GlobalShortcutsError as exc:
+                self._hotkey_error = str(exc)
+                self._refresh_hotkey_status()
+                messagebox.showerror("Hotkey setup failed", str(exc))
+                return
+            self.hotkey_trigger = bound.get("toggle")
+            self._hotkey_error = None
+            self._refresh_hotkey_status()
+        try:
+            self.hotkey.reconfigure()
+        except GlobalShortcutsError as exc:
+            messagebox.showerror("Hotkey setup failed", str(exc))
+            return
+        messagebox.showinfo(
+            "Configure Hotkey",
+            "Assign your shortcut in KDE's dialog, then click OK here to refresh.",
+        )
+        try:
+            bound = self.hotkey.list_shortcuts()
+            self.hotkey_trigger = bound.get("toggle")
+        except GlobalShortcutsError:
+            pass
+        self._refresh_hotkey_status()
+
+    # ---- Macros tab ----
+    def _build_macros_tab(self, parent):
+        list_frame = ttk.Frame(parent)
+        list_frame.grid(row=0, column=0, sticky="nsew")
+        self._macro_listbox = tk.Listbox(list_frame, height=8, width=32, exportselection=False)
+        self._macro_listbox.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(list_frame, command=self._macro_listbox.yview)
+        scrollbar.pack(side="left", fill="y")
+        self._macro_listbox.config(yscrollcommand=scrollbar.set)
+        self._refresh_macro_list()
+
+        btns = ttk.Frame(parent)
+        btns.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self._record_btn = ttk.Button(btns, text="Record New…", command=self._on_record_macro)
+        self._record_btn.grid(row=0, column=0, padx=2, sticky="ew")
+        self._play_btn = ttk.Button(btns, text="Play", command=self._on_play_macro)
+        self._play_btn.grid(row=0, column=1, padx=2, sticky="ew")
+        self._stop_macro_btn = ttk.Button(btns, text="Stop", command=self._on_stop_macro, state="disabled")
+        self._stop_macro_btn.grid(row=0, column=2, padx=2, sticky="ew")
+        ttk.Button(btns, text="Delete", command=self._on_delete_macro).grid(row=0, column=3, padx=2, sticky="ew")
+        btns.columnconfigure((0, 1, 2, 3), weight=1)
+
+        if self._recording:
+            self._record_btn.config(state="disabled")
+            self._play_btn.config(state="disabled")
+        if self._macro_running:
+            self._play_btn.config(state="disabled")
+            self._stop_macro_btn.config(state="normal")
+
+        loop_frame = ttk.Frame(parent)
+        loop_frame.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(loop_frame, text="Loop count (0 = forever):").pack(side="left")
+        self.macro_loop_count = tk.StringVar(value="0")
+        ttk.Entry(loop_frame, textvariable=self.macro_loop_count, width=6).pack(side="left", padx=6)
+
+        self._macro_status_var = tk.StringVar(value="")
+        ttk.Label(parent, textvariable=self._macro_status_var, foreground="#0a7a4a", wraplength=320).grid(
+            row=3, column=0, sticky="w", pady=(8, 0)
+        )
+
+    def _refresh_macro_list(self):
+        self._macro_listbox.delete(0, "end")
+        for name in Macro.list_names():
+            self._macro_listbox.insert("end", name)
+
+    def _on_record_macro(self):
+        name = simpledialog.askstring("Record Macro", "Name for this macro:", parent=self._settings_win)
+        if not name:
+            return
+        name = name.strip()
+        if not name:
+            return
+        if Macro.exists(name):
+            if not messagebox.askyesno("Overwrite?", f"A macro named {name!r} already exists. Overwrite it?"):
+                return
+        try:
+            mice, keyboards = list_candidate_devices()
+        except RecorderError as exc:
+            messagebox.showerror("Can't record", str(exc))
+            return
+        if not mice or not keyboards:
+            messagebox.showerror("Can't record", "No mouse and/or keyboard input device found to record from.")
+            return
+
+        self._recorder = MacroRecorder(mice[0], keyboards[0], self.root.winfo_pointerxy)
+        self._recorder.start()
+        self._recording = True
+        self._pending_macro_name = name
+        self._record_btn.config(state="disabled")
+        self._play_btn.config(state="disabled")
+        self._macro_status_var.set(f"Recording from {mice[0].name!r} / {keyboards[0].name!r}… press F9 to stop.")
+        self._poll_recorder()
+
+    def _poll_recorder(self):
+        if self._recorder is None:
+            return
+        stopped = self._recorder.poll()
+        if self._settings_open():
+            self._macro_status_var.set(f"Recording… {len(self._recorder.steps)} step(s) captured. Press F9 to stop.")
+        if stopped:
+            self._finish_recording()
+            return
+        self.root.after(100, self._poll_recorder)
+
+    def _finish_recording(self):
+        steps = self._recorder.steps
+        self._recorder.close()
+        self._recorder = None
+        self._recording = False
+        name = self._pending_macro_name
+        self._pending_macro_name = None
+        macro = Macro(name=name, steps=steps, loop_count=0)
+        macro.save()
+        if self._settings_open():
+            self._record_btn.config(state="normal")
+            self._play_btn.config(state="normal")
+            self._macro_status_var.set(f"Saved {name!r} with {len(steps)} step(s).")
+            self._refresh_macro_list()
+
+    def _on_play_macro(self):
+        sel = self._macro_listbox.curselection()
+        if not sel:
+            messagebox.showerror("No macro selected", "Select a macro to play.")
+            return
+        name = self._macro_listbox.get(sel[0])
+        try:
+            macro = Macro.load(name)
+        except MacroError as exc:
+            messagebox.showerror("Can't load macro", str(exc))
+            return
+        try:
+            macro.loop_count = int(self.macro_loop_count.get() or 0)
+        except ValueError:
+            messagebox.showerror("Invalid loop count", "Loop count must be a whole number.")
+            return
+        if macro.loop_count < 0:
+            messagebox.showerror("Invalid loop count", "Loop count can't be negative.")
+            return
+        if self.backend is None:
+            self._show_backend_error()
+            return
+        if self._running:
+            messagebox.showerror("Busy", "Stop Simple Click before playing a macro.")
+            return
+        if self._macro_running:
+            return
+
+        self._macro_stop_event.clear()
+        self._macro_running = True
+        self._play_btn.config(state="disabled")
+        self._stop_macro_btn.config(state="normal")
+        self._macro_status_var.set(f"Playing {name!r}…")
+
+        player = MacroPlayer(self.backend, self._macro_stop_event, self._ui_queue)
+        self._macro_thread = threading.Thread(target=player.play, args=(macro,), daemon=True)
+        self._macro_thread.start()
+
+    def _on_stop_macro(self):
+        self._macro_stop_event.set()
+
+    def _on_delete_macro(self):
+        sel = self._macro_listbox.curselection()
+        if not sel:
+            return
+        name = self._macro_listbox.get(sel[0])
+        if messagebox.askyesno("Delete macro", f"Delete {name!r}?"):
+            Macro.delete(name)
+            self._refresh_macro_list()
+
+    # ---- About tab ----
+    def _build_about_tab(self, parent):
+        ttk.Label(parent, text="ClickyClick", font=("", 14, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(parent, text="Made by Darius Kazlauskas").grid(row=1, column=0, sticky="w", pady=(8, 2))
+        link = ttk.Label(parent, text="www.erased.no", foreground="#3366cc", cursor="hand2")
+        link.grid(row=2, column=0, sticky="w")
+        link.bind("<Button-1>", lambda ev: webbrowser.open(ABOUT_URL))
 
     # ---------- dialogs ----------
     def _show_backend_error(self):
@@ -299,13 +601,17 @@ class ClickyClickApp:
             "ClickyClick — setup needed", BACKEND_ERROR_MSG_TEMPLATE.format(error=self._backend_error)
         )
 
-    def _show_hotkey_help(self):
-        messagebox.showinfo("Global Hotkey Setup", HOTKEY_HELP_MSG)
-
     def on_close(self):
         self._stop_event.set()
+        self._macro_stop_event.set()
+        if self._recorder is not None:
+            self._recorder.close()
         if self._click_thread and self._click_thread.is_alive():
             self._click_thread.join(timeout=0.5)
+        if self._macro_thread and self._macro_thread.is_alive():
+            self._macro_thread.join(timeout=0.5)
+        if self.hotkey is not None:
+            self.hotkey.close()
         if self.backend:
             self.backend.close()
         self.root.destroy()
