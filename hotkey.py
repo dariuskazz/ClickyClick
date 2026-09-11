@@ -34,10 +34,17 @@ class HotkeyError(RuntimeError):
     pass
 
 
+class HotkeyPermissionError(HotkeyError):
+    """Specifically: no permission to read /dev/input/event*. Distinct from
+    the base class so a caller can offer to fix this one automatically
+    (add the user to the `input` group) rather than just explain it -- see
+    ClickyClickApp._offer_input_group_fix."""
+
+
 def list_keyboards():
     """Return evdev.InputDevice candidates classified as keyboards.
-    Raises HotkeyError (wrapping the PermissionError) if the running user
-    can't read /dev/input/event* -- see the README's `input`-group step.
+    Raises HotkeyPermissionError if the running user can't read
+    /dev/input/event* -- see the README's `input`-group step.
 
     Deliberately globs for device paths directly rather than using
     evdev.list_devices(): that function silently drops any path the
@@ -54,7 +61,7 @@ def list_keyboards():
         try:
             dev = evdev.InputDevice(path)
         except PermissionError as exc:
-            raise HotkeyError(
+            raise HotkeyPermissionError(
                 "no permission to read input devices -- run "
                 "'sudo usermod -aG input $USER', then log out and back in "
                 f"({exc})"

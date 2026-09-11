@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+import getpass
 import json
 import queue
 import signal
+import subprocess
 import threading
 import tkinter as tk
 import webbrowser
@@ -10,10 +12,10 @@ from tkinter import messagebox, simpledialog, ttk
 
 from evdev import ecodes as e
 
-from hotkey import HotkeyCapture, HotkeyError, HotkeyListener, format_combo, list_keyboards
+from hotkey import HotkeyCapture, HotkeyError, HotkeyListener, HotkeyPermissionError, format_combo, list_keyboards
 from input_backend import BackendUnavailable, InputBackend
 from macro import Macro, MacroError, MacroPlayer
-from recorder import MacroRecorder, RecorderError, list_candidate_devices
+from recorder import MacroRecorder, RecorderError, RecorderPermissionError, list_candidate_devices
 
 BACKEND_ERROR_MSG_TEMPLATE = (
     "Couldn't set up a RemoteDesktop session with the compositor:\n\n"
@@ -411,6 +413,9 @@ class ClickyClickApp:
     def _on_set_hotkey(self):
         try:
             keyboards = list_keyboards()
+        except HotkeyPermissionError as exc:
+            self._offer_input_group_fix(str(exc))
+            return
         except HotkeyError as exc:
             messagebox.showerror("Can't set hotkey", str(exc))
             return
@@ -510,6 +515,9 @@ class ClickyClickApp:
                 return
         try:
             mice, keyboards = list_candidate_devices()
+        except RecorderPermissionError as exc:
+            self._offer_input_group_fix(str(exc))
+            return
         except RecorderError as exc:
             messagebox.showerror("Can't record", str(exc))
             return
@@ -615,6 +623,53 @@ class ClickyClickApp:
         messagebox.showerror(
             "ClickyClick — setup needed", BACKEND_ERROR_MSG_TEMPLATE.format(error=self._backend_error)
         )
+
+    def _offer_input_group_fix(self, detail):
+        """Offer to run `usermod -aG input <user>` via a graphical polkit
+        prompt (pkexec) instead of just telling the user to type it into a
+        terminal themselves. The actual privilege escalation and password
+        entry happens in pkexec's own native dialog -- this app never sees
+        the password, only whether pkexec's child process succeeded."""
+        proceed = messagebox.askyesno(
+            "Permission needed",
+            "ClickyClick needs to read your keyboard/mouse for hotkeys and "
+            "macro recording, which requires your user to be in the "
+            "'input' group (a one-time system change).\n\n"
+            "Add your user to the 'input' group now? A password prompt "
+            "will appear.\n\n"
+            f"({detail})",
+        )
+        if not proceed:
+            return
+        try:
+            result = subprocess.run(
+                ["pkexec", "usermod", "-aG", "input", getpass.getuser()],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except FileNotFoundError:
+            messagebox.showerror(
+                "Can't run pkexec",
+                "pkexec isn't available on this system. Run this yourself "
+                "in a terminal:\n\n  sudo usermod -aG input $USER",
+            )
+            return
+        except subprocess.TimeoutExpired:
+            messagebox.showerror("Timed out", "The permission prompt timed out or wasn't answered.")
+            return
+        if result.returncode == 0:
+            messagebox.showinfo(
+                "Done",
+                "Your user was added to the 'input' group.\n\n"
+                "Log out and log back in for this to take effect, then try again.",
+            )
+        else:
+            messagebox.showerror(
+                "Couldn't add to group",
+                "The password prompt was cancelled or failed.\n\n"
+                + (result.stderr.strip() or "Run this yourself in a terminal:\n\n  sudo usermod -aG input $USER"),
+            )
 
     def on_close(self):
         self._stop_event.set()
