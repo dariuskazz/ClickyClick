@@ -37,6 +37,17 @@ BUTTONS = {
 DOUBLE_CLICK_GAP = 0.09
 PRESS_RELEASE_GAP = 0.02
 DEVICE_WAIT_TIMEOUT = 10.0
+NEGOTIATE_RETRIES = 3
+NEGOTIATE_RETRY_DELAY = 1.0
+TRANSIENT_ERROR_SIGNATURE = "unable to open /proc"
+"""Substring of a known xdg-desktop-portal 1.22 bug: CreateSession
+occasionally fails with AccessDenied ("Portal operation not allowed: Unable
+to open /proc/<pid>/root") because the portal's own caller-identification
+code trips over itself, not because of anything wrong with this app's
+permissions -- confirmed system-wide, since polkit-kde-authentication-agent
+has hit the exact same error registering with the portal. It has always
+been observed to succeed on a prompt retry, so retry a few times before
+surfacing it as a real failure."""
 DEVICE_SETTLE_SECONDS = 1.5
 """How long to keep draining EIS events after both required devices have
 resumed. The compositor resumes multiple devices (absolute pointer, relative
@@ -54,11 +65,7 @@ class InputBackend:
     def __init__(self):
         restore_token = self._load_restore_token()
         try:
-            self._session = RemoteDesktopSession.negotiate(
-                devices=DeviceType.POINTER | DeviceType.KEYBOARD,
-                persist_mode=PersistMode.UNTIL_REVOKED,
-                restore_token=restore_token,
-            )
+            self._session = self._negotiate_with_retry(restore_token)
         except PortalError as exc:
             raise BackendUnavailable(str(exc)) from exc
         self._save_restore_token(self._session.restore_token)
@@ -79,6 +86,21 @@ class InputBackend:
         self.regions = self._pointer.regions
 
     # ---------- setup ----------
+    @staticmethod
+    def _negotiate_with_retry(restore_token):
+        for attempt in range(NEGOTIATE_RETRIES):
+            try:
+                return RemoteDesktopSession.negotiate(
+                    devices=DeviceType.POINTER | DeviceType.KEYBOARD,
+                    persist_mode=PersistMode.UNTIL_REVOKED,
+                    restore_token=restore_token,
+                )
+            except PortalError as exc:
+                is_last = attempt == NEGOTIATE_RETRIES - 1
+                if TRANSIENT_ERROR_SIGNATURE not in str(exc).lower() or is_last:
+                    raise
+                time.sleep(NEGOTIATE_RETRY_DELAY)
+
     @staticmethod
     def _load_restore_token():
         try:
