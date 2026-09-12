@@ -1,10 +1,6 @@
 # ClickyClick
 
-> **Picking this up after a break?** Check [HANDOFF.md](HANDOFF.md) first — it tracks the current open issue and hard-won lessons from the last debugging session, so they don't get re-learned or undone by accident.
-
 A configurable auto clicker and macro tool for Linux with runtime-selected X11 and Wayland backends. On Wayland, clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using `libei`/EIS, and the global start/stop action uses the standard `GlobalShortcuts` portal. On X11, ClickyClick uses the X server through `pynput`. After the optional one-time Wayland recording setup, normal operation needs no administrator password or logout.
-
-This isn't the first thing that was tried. `uinput` (what `ydotool` uses) creates a real kernel-level virtual mouse, but KWin accepts synthetic *keyboard* input from it while silently dropping synthetic *pointer* input (clicks and motion) — confirmed by hand, not assumed. X11-style injection (`xdotool`/`pynput`, XTest) is blocked outright on Wayland. The portal's own plain D-Bus methods (`NotifyPointerButton` etc.) also silently no-op on this KWin version. Negotiating a proper portal session and injecting through the real EIS protocol is the one path that actually works.
 
 ## Setup
 
@@ -88,31 +84,17 @@ The following steps are the same on every distribution:
 ```bash
 git clone https://github.com/dariuskazz/ClickyClick.git
 cd ClickyClick
-python3 -m venv --system-site-packages venv
-./venv/bin/pip install -r requirements.txt
+./install.sh
 ```
 
-Using `--system-site-packages` allows the virtual environment to use the
-distribution's tested PyGObject/GIO bindings while keeping ClickyClick's other
-Python dependencies isolated.
+The installer creates a Python virtual environment, installs the dependencies,
+and adds ClickyClick to the current user's application menu. It does not need
+administrator access.
 
 Run it:
 
 ```bash
 ./run.sh
-```
-
-Install the application-menu launcher for the current user:
-
-```bash
-mkdir -p ~/.local/share/applications
-ln -sfn "$(pwd)/clickyclick.desktop" ~/.local/share/applications/clickyclick.desktop
-```
-
-On KDE Plasma, refresh the application index:
-
-```bash
-kbuildsycoca6 --noincremental
 ```
 
 ### First Wayland launch
@@ -137,9 +119,8 @@ git pull --ff-only
 ./venv/bin/pip install -r requirements.txt
 ```
 
-Because the launcher is a symlink, code, name, and icon updates take effect
-without reinstalling the launcher. KDE users can run
-`kbuildsycoca6 --noincremental` after an icon or desktop-entry update.
+Run `./install.sh` again after moving the downloaded folder so the application
+menu entry receives the new path.
 
 ### Distribution notes
 
