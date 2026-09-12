@@ -33,6 +33,7 @@ BACKEND_ERROR_MSG_TEMPLATE = (
 )
 
 ABOUT_URL = "https://www.erased.no"
+APP_VERSION = "1.0"
 
 HOTKEY_CONFIG_PATH = Path.home() / ".config" / "clickyclick" / "hotkey.json"
 MACRO_HOTKEY_CONFIG_PATH = Path.home() / ".config" / "clickyclick" / "macro_hotkey.json"
@@ -866,9 +867,10 @@ class ClickyClickApp:
     # ---- About tab ----
     def _build_about_tab(self, parent):
         ttk.Label(parent, text="ClickyClick", font=("", 14, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(parent, text="Made by Darius Kazlauskas").grid(row=1, column=0, sticky="w", pady=(8, 2))
+        ttk.Label(parent, text=f"Version {APP_VERSION}").grid(row=1, column=0, sticky="w", pady=(8, 2))
+        ttk.Label(parent, text="Made by Darius Kazlauskas").grid(row=2, column=0, sticky="w", pady=(0, 2))
         link = ttk.Label(parent, text="www.erased.no", foreground="#3366cc", cursor="hand2")
-        link.grid(row=2, column=0, sticky="w")
+        link.grid(row=3, column=0, sticky="w")
         link.bind("<Button-1>", lambda ev: webbrowser.open(ABOUT_URL))
 
     # ---------- dialogs ----------
