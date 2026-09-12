@@ -10,6 +10,11 @@ python3 -m venv --system-site-packages "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
 
 mkdir -p "$APPLICATIONS_DIR"
+# Replace the symlink created by early ClickyClick installers. Writing through
+# that link would overwrite the repository's launcher template.
+if [ -L "$DESKTOP_FILE" ]; then
+    unlink "$DESKTOP_FILE"
+fi
 sed \
     -e "s|@EXEC@|$APP_DIR/run.sh|g" \
     -e "s|@ICON@|$APP_DIR/assets/icon.png|g" \
