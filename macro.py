@@ -6,6 +6,9 @@ when editing a macro manually.
 """
 
 import json
+import os
+import re
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
@@ -13,6 +16,7 @@ from typing import Optional
 from evdev import ecodes as e
 
 MACROS_DIR = Path.home() / ".config" / "clickyclick" / "macros"
+VALID_NAME = re.compile(r"^[^/\\\x00-\x1f]{1,100}$")
 
 STEP_TYPES = ("move", "click", "key_down", "key_up")
 BUTTON_NAMES = {
@@ -37,6 +41,16 @@ class Step:
             raise ValueError(f"unknown step type: {self.type!r}")
         if self.delay_ms < 0:
             raise ValueError("delay_ms can't be negative")
+        if self.type == "move" and (not isinstance(self.x, int) or not isinstance(self.y, int)):
+            raise ValueError("move steps require integer x/y coordinates")
+        if self.type == "click" and not (
+            (self.x is None and self.y is None) or (isinstance(self.x, int) and isinstance(self.y, int))
+        ):
+            raise ValueError("click coordinates must be two integers or both omitted")
+        if self.type == "click" and self.button not in (None, "left", "right", "middle"):
+            raise ValueError(f"unknown mouse button: {self.button!r}")
+        if self.type in ("key_down", "key_up") and not isinstance(self.key, str):
+            raise ValueError(f"{self.type} steps require a key name")
 
     def to_dict(self):
         return asdict(self)
@@ -80,6 +94,17 @@ class Macro:
     def to_dict(self):
         return {"name": self.name, "loop_count": self.loop_count, "steps": [s.to_dict() for s in self.steps]}
 
+    @staticmethod
+    def _validate_name(name):
+        if not isinstance(name, str) or not VALID_NAME.fullmatch(name) or name in (".", ".."):
+            raise MacroError("macro names must be 1-100 characters and cannot contain slashes or control characters")
+        return name
+
+    @classmethod
+    def _path(cls, name):
+        cls._validate_name(name)
+        return MACROS_DIR / f"{name}.json"
+
     @classmethod
     def from_dict(cls, data):
         return cls(
@@ -89,13 +114,27 @@ class Macro:
         )
 
     def save(self):
-        MACROS_DIR.mkdir(parents=True, exist_ok=True)
-        path = MACROS_DIR / f"{self.name}.json"
-        path.write_text(json.dumps(self.to_dict(), indent=2))
+        path = self._path(self.name)
+        MACROS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(MACROS_DIR, 0o700)
+        fd, temporary = tempfile.mkstemp(prefix=".macro-", dir=MACROS_DIR)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                json.dump(self.to_dict(), stream, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
     @classmethod
     def load(cls, name):
-        path = MACROS_DIR / f"{name}.json"
+        path = cls._path(name)
         try:
             return cls.from_dict(json.loads(path.read_text()))
         except (OSError, ValueError, KeyError) as exc:
@@ -109,11 +148,11 @@ class Macro:
 
     @staticmethod
     def delete(name):
-        (MACROS_DIR / f"{name}.json").unlink(missing_ok=True)
+        Macro._path(name).unlink(missing_ok=True)
 
     @staticmethod
     def exists(name):
-        return (MACROS_DIR / f"{name}.json").exists()
+        return Macro._path(name).exists()
 
 
 class MacroPlayer:
