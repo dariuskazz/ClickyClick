@@ -1,5 +1,5 @@
 """Macro recording: builds a Step list from real mouse/keyboard actions,
-fed from the shared raw-input event stream (see privileged_input.py).
+fed from the password-free X11 event stream (see x11_backend.py).
 
 Mouse position is never reconstructed from raw relative deltas -- that
 would drift. Instead, whenever a click happens, or periodically between

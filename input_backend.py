@@ -19,6 +19,7 @@ token saved to disk, so normal use after that is silent.
 """
 
 import select
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -143,8 +144,12 @@ class InputBackend:
     def _save_restore_token(token):
         if not token:
             return
-        RESTORE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        RESTORE_TOKEN_PATH.write_text(token)
+        RESTORE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(RESTORE_TOKEN_PATH.parent, 0o700)
+        fd = os.open(RESTORE_TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            stream.write(token)
+        os.chmod(RESTORE_TOKEN_PATH, 0o600)
 
     def _wait_for_devices(self):
         deadline = time.monotonic() + DEVICE_WAIT_TIMEOUT

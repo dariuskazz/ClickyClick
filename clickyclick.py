@@ -8,13 +8,19 @@ import webbrowser
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import GLib
 from evdev import ecodes as e
 
 from hotkey import HotkeyCapture, HotkeyError, HotkeyListener, format_combo
-from input_backend import BackendUnavailable, InputBackend
+from evdev_input import InputAccessRequired
+from input_access_setup import InputSetupError, install_input_access
+from input_backend import BackendUnavailable
 from macro import Macro, MacroError, MacroPlayer
-from privileged_input import PrivilegedInputError, PrivilegedInputSource
+from portal_shortcuts import GlobalShortcutsError, PortalGlobalShortcuts
 from recorder import MacroRecorder
+from session_backend import create_input_source, create_output_backend, session_type
 
 BACKEND_ERROR_MSG_TEMPLATE = (
     "Couldn't set up a RemoteDesktop session with the compositor:\n\n"
@@ -29,6 +35,7 @@ BACKEND_ERROR_MSG_TEMPLATE = (
 ABOUT_URL = "https://www.erased.no"
 
 HOTKEY_CONFIG_PATH = Path.home() / ".config" / "clickyclick" / "hotkey.json"
+MACRO_HOTKEY_CONFIG_PATH = Path.home() / ".config" / "clickyclick" / "macro_hotkey.json"
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.png"
 
 
@@ -64,18 +71,25 @@ class ClickyClickApp:
         self.backend = None
         self._backend_error = None
         try:
-            self.backend = InputBackend()
-        except BackendUnavailable as exc:
+            self.backend = create_output_backend()
+        except (BackendUnavailable, RuntimeError) as exc:
             self._backend_error = str(exc)
 
-        self._privileged_input = None
+        self._input_source = None
+        self._portal_shortcuts = None
+        self._portal_shortcut_description = None
         self.hotkey_listener = None
         self.hotkey_combo = None  # (frozenset of modifier names, evdev key code)
         self._hotkey_capture = None
+        self.macro_hotkey_listener = None
+        self.macro_hotkey_combo = None
+        self.macro_hotkey_name = None
+        self._macro_hotkey_capture = None
         self._load_and_start_hotkey()
 
         self._build_vars()
         self._build_ui()
+        self._load_macro_hotkey()
         self._pump_queue()
 
         if self._backend_error:
@@ -170,13 +184,14 @@ class ClickyClickApp:
         self.toggle_btn = ttk.Button(btn_frame, text="Start", command=self._toggle_start_stop)
         self.toggle_btn.grid(row=0, column=0, padx=4, sticky="ew")
         ttk.Button(btn_frame, text="Settings…", command=self._open_settings).grid(row=0, column=1, padx=4, sticky="ew")
-        btn_frame.columnconfigure((0, 1), weight=1)
+        ttk.Button(btn_frame, text="Stop All", command=self._stop_all).grid(row=0, column=2, padx=4, sticky="ew")
+        btn_frame.columnconfigure((0, 1, 2), weight=1)
 
         # In-window convenience bindings; the same physical action (button or
         # key) both starts and stops. The global hotkey configured in
         # Settings does the same thing regardless of window focus.
         self.root.bind("<F6>", lambda ev: self._toggle_start_stop())
-        self.root.bind("<Escape>", lambda ev: self._toggle_start_stop())
+        self.root.bind("<Escape>", lambda ev: self._stop_all())
 
     # ---------- signal / hotkey plumbing ----------
     def _install_signal_handlers(self):
@@ -184,18 +199,17 @@ class ClickyClickApp:
         # the process) so a plain `kill`/`pkill` still quits the app normally.
         signal.signal(signal.SIGUSR1, lambda signum, frame: self._ui_queue.put(("toggle", None)))
 
-    def _ensure_privileged_input(self):
-        """Lazily starts the shared root-privileged input reader (see
-        privileged_input.py) on first use by either the hotkey or macro
-        feature, and reuses it for the rest of this run -- at most one
-        pkexec password prompt per launch, covering both features, never a
-        logout. Raises PrivilegedInputError if pkexec was cancelled or
-        failed."""
-        if self._privileged_input is None:
-            self._privileged_input = PrivilegedInputSource()
-        return self._privileged_input
+    def _ensure_input_source(self):
+        """Start password-free global observation where the session supports it."""
+        if self._input_source is None:
+            self._input_source = create_input_source()
+        return self._input_source
 
     def _load_and_start_hotkey(self):
+        if session_type() == "wayland":
+            self._portal_shortcut_description = "Connecting to desktop portal…"
+            self.root.after(200, self._begin_portal_shortcut)
+            return
         try:
             data = json.loads(HOTKEY_CONFIG_PATH.read_text())
             combo = (frozenset(data["modifiers"]), data["key_code"])
@@ -204,7 +218,26 @@ class ClickyClickApp:
         try:
             self._start_hotkey_listener(combo)
         except HotkeyError:
-            pass  # e.g. the pkexec prompt was cancelled; Settings shows "Not set"
+            pass  # X11 listener could not be started; Settings shows "Not set"
+
+    def _begin_portal_shortcut(self):
+        threading.Thread(target=self._connect_portal_shortcut, daemon=True).start()
+
+    def _connect_portal_shortcut(self):
+        portal = None
+        try:
+            portal = PortalGlobalShortcuts()
+            descriptions = portal.bind(
+                lambda shortcut_id: self._ui_queue.put((
+                    "toggle_macro" if shortcut_id == "toggle_macro" else "toggle", None
+                ))
+            )
+        except (GlobalShortcutsError, GLib.Error, OSError) as exc:
+            if portal is not None:
+                portal.close()
+            self._ui_queue.put(("portal_hotkey", (None, f"Unavailable: {exc}")))
+            return
+        self._ui_queue.put(("portal_hotkey", (portal, descriptions)))
 
     def _start_hotkey_listener(self, combo):
         """combo: (frozenset of modifier names, evdev key code). Raises
@@ -213,8 +246,8 @@ class ClickyClickApp:
             self.hotkey_listener.close()
             self.hotkey_listener = None
         try:
-            source = self._ensure_privileged_input()
-        except PrivilegedInputError as exc:
+            source = self._ensure_input_source()
+        except RuntimeError as exc:
             raise HotkeyError(str(exc)) from exc
         modifiers, key_code = combo
         listener = HotkeyListener(source, modifiers, key_code, on_triggered=self._on_hotkey_triggered)
@@ -227,11 +260,69 @@ class ClickyClickApp:
         # the same thread-safe queue as every other cross-thread signal.
         self._ui_queue.put(("toggle", None))
 
+    def _load_macro_hotkey(self):
+        try:
+            data = json.loads(MACRO_HOTKEY_CONFIG_PATH.read_text())
+            self.macro_hotkey_name = data["macro"]
+            if session_type() == "x11":
+                combo = (frozenset(data["modifiers"]), data["key_code"])
+                self._start_macro_hotkey_listener(combo)
+        except (OSError, ValueError, KeyError, HotkeyError):
+            return
+
+    def _start_macro_hotkey_listener(self, combo):
+        if self.macro_hotkey_listener is not None:
+            self.macro_hotkey_listener.close()
+        try:
+            source = self._ensure_input_source()
+        except RuntimeError as exc:
+            raise HotkeyError(str(exc)) from exc
+        modifiers, key_code = combo
+        listener = HotkeyListener(
+            source, modifiers, key_code,
+            on_triggered=lambda: self._ui_queue.put(("toggle_macro", None)),
+        )
+        listener.start()
+        self.macro_hotkey_listener = listener
+        self.macro_hotkey_combo = combo
+
+    def _save_macro_hotkey(self):
+        import os
+        data = {"macro": self.macro_hotkey_name}
+        if self.macro_hotkey_combo is not None:
+            modifiers, key_code = self.macro_hotkey_combo
+            data.update({"modifiers": sorted(modifiers), "key_code": key_code})
+        MACRO_HOTKEY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(MACRO_HOTKEY_CONFIG_PATH.parent, 0o700)
+        fd = os.open(MACRO_HOTKEY_CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream)
+        os.chmod(MACRO_HOTKEY_CONFIG_PATH, 0o600)
+
+    def _toggle_macro_hotkey(self):
+        if self._macro_running:
+            self._on_stop_macro()
+            return
+        if not self.macro_hotkey_name:
+            messagebox.showerror("No hotkey macro", "Choose a macro in Settings → Macros first.")
+            return
+        try:
+            macro = Macro.load(self.macro_hotkey_name)
+        except MacroError as exc:
+            messagebox.showerror("Can't load macro", str(exc))
+            return
+        self._start_macro_playback(macro, self.macro_hotkey_name)
+
     @staticmethod
     def _save_hotkey_combo(combo):
+        import os
         modifiers, key_code = combo
-        HOTKEY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        HOTKEY_CONFIG_PATH.write_text(json.dumps({"modifiers": sorted(modifiers), "key_code": key_code}))
+        HOTKEY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(HOTKEY_CONFIG_PATH.parent, 0o700)
+        fd = os.open(HOTKEY_CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"modifiers": sorted(modifiers), "key_code": key_code}, stream)
+        os.chmod(HOTKEY_CONFIG_PATH, 0o600)
 
     # ---------- pick location ----------
     def _start_pick_location(self):
@@ -253,6 +344,10 @@ class ClickyClickApp:
             self._on_stop_clicked()
         else:
             self._on_start_clicked()
+
+    def _stop_all(self):
+        self._stop_event.set()
+        self._macro_stop_event.set()
 
     def _validate_and_build_config(self):
         try:
@@ -281,8 +376,6 @@ class ClickyClickApp:
                 x, y = int(self.fixed_x.get()), int(self.fixed_y.get())
             except ValueError:
                 raise ValueError("Fixed position X/Y must be whole numbers.")
-            if not (0 <= x < self.screen_w and 0 <= y < self.screen_h):
-                raise ValueError(f"Fixed position must be within 0..{self.screen_w - 1}, 0..{self.screen_h - 1}.")
             cfg["x"], cfg["y"] = x, y
 
         if cfg["repeat_mode"] == "count":
@@ -327,17 +420,21 @@ class ClickyClickApp:
     # ---------- click loop (background thread) ----------
     def _click_loop(self, cfg):
         count = 0
-        while not self._stop_event.is_set():
-            if cfg["position_mode"] == "fixed":
-                self.backend.move_absolute(cfg["x"], cfg["y"])
-            self.backend.click(cfg["button"], double=cfg["double"])
-            count += 1
-            self._ui_queue.put(("count", count))
-            if cfg["repeat_mode"] == "count" and count >= cfg["repeat_count"]:
-                break
-            if self._stop_event.wait(cfg["interval"]):
-                break
-        self._ui_queue.put(("stopped", None))
+        try:
+            while not self._stop_event.is_set():
+                if cfg["position_mode"] == "fixed":
+                    self.backend.move_absolute(cfg["x"], cfg["y"])
+                self.backend.click(cfg["button"], double=cfg["double"])
+                count += 1
+                self._ui_queue.put(("count", count))
+                if cfg["repeat_mode"] == "count" and count >= cfg["repeat_count"]:
+                    break
+                if self._stop_event.wait(cfg["interval"]):
+                    break
+        except Exception as exc:
+            self._ui_queue.put(("runtime_error", f"Clicking stopped: {exc}"))
+        finally:
+            self._ui_queue.put(("stopped", None))
 
     # ---------- queue pump (main thread; also keeps signals/hotkey responsive) ----------
     def _pump_queue(self):
@@ -361,9 +458,28 @@ class ClickyClickApp:
                         self._play_btn.config(state="normal")
                         self._stop_macro_btn.config(state="disabled")
                         self._macro_status_var.set(f"Stopped after {payload} step(s).")
+                elif kind == "runtime_error":
+                    messagebox.showerror("ClickyClick error", payload)
+                elif kind == "portal_hotkey":
+                    self._portal_shortcuts, descriptions = payload
+                    if self._portal_shortcuts is not None:
+                        self.hotkey_combo = (frozenset(), e.KEY_F6)
+                        self._portal_shortcut_description = (
+                            f"Clicking: {descriptions.get('toggle_clicks', 'Assigned')}; "
+                            f"macro: {descriptions.get('toggle_macro', 'Assigned')}"
+                        )
+                    else:
+                        self._portal_shortcut_description = descriptions
+                    if self._settings_open():
+                        self._refresh_hotkey_status()
+                        self._refresh_macro_hotkey_status()
+                elif kind == "toggle_macro":
+                    self._toggle_macro_hotkey()
         except queue.Empty:
             pass
         self.root.after(50, self._pump_queue)
+        if self._portal_shortcuts is not None:
+            self._portal_shortcuts.pump()
 
     # ---------- Settings window ----------
     def _settings_open(self):
@@ -407,24 +523,40 @@ class ClickyClickApp:
         self._set_hotkey_btn.grid(row=2, column=0, sticky="w")
         ttk.Label(
             parent,
-            text="Works even while another window (e.g. a game) has focus. Assigned and "
-            "detected entirely within this app -- nothing is registered with KDE, so "
-            "closing ClickyClick leaves no shortcut behind.",
+            text=(
+                "Works while another window has focus. On Wayland, assignment is handled "
+                "by the desktop's standard Global Shortcuts portal. On X11 it is detected "
+                "directly without administrator access."
+            ),
             foreground="#666666",
             wraplength=320,
             justify="left",
         ).grid(row=3, column=0, sticky="w", pady=(10, 0))
 
     def _refresh_hotkey_status(self):
+        if session_type() == "wayland":
+            self._hotkey_status_var.set(
+                "Portal shortcut: " + (self._portal_shortcut_description or "Not configured")
+            )
+            return
         if self.hotkey_combo:
             self._hotkey_status_var.set(f"Currently set to: {format_combo(*self.hotkey_combo)}")
         else:
             self._hotkey_status_var.set("Not set.")
 
     def _on_set_hotkey(self):
+        if session_type() == "wayland":
+            if self._portal_shortcuts is None:
+                messagebox.showerror("Can't set hotkey", self._portal_shortcut_description or "Portal unavailable")
+                return
+            try:
+                self._portal_shortcuts.configure()
+            except (GlobalShortcutsError, GLib.Error) as exc:
+                messagebox.showerror("Can't set hotkey", str(exc))
+            return
         try:
-            source = self._ensure_privileged_input()
-        except PrivilegedInputError as exc:
+            source = self._ensure_input_source()
+        except RuntimeError as exc:
             messagebox.showerror("Can't set hotkey", str(exc))
             return
         self._set_hotkey_btn.config(state="disabled")
@@ -501,6 +633,88 @@ class ClickyClickApp:
             row=3, column=0, sticky="w", pady=(8, 0)
         )
 
+        hotkey_frame = ttk.LabelFrame(parent, text="Global macro start/stop")
+        hotkey_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        self._macro_hotkey_status_var = tk.StringVar()
+        self._refresh_macro_hotkey_status()
+        ttk.Label(hotkey_frame, textvariable=self._macro_hotkey_status_var, wraplength=320).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=6, pady=6
+        )
+        ttk.Button(hotkey_frame, text="Use Selected Macro", command=self._choose_hotkey_macro).grid(
+            row=1, column=0, padx=6, pady=(0, 6), sticky="ew"
+        )
+        self._set_macro_hotkey_btn = ttk.Button(
+            hotkey_frame, text="Set Toggle Hotkey…", command=self._set_macro_hotkey
+        )
+        self._set_macro_hotkey_btn.grid(row=1, column=1, padx=6, pady=(0, 6), sticky="ew")
+
+    def _refresh_macro_hotkey_status(self):
+        if not hasattr(self, "_macro_hotkey_status_var"):
+            return
+        macro_name = self.macro_hotkey_name or "none selected"
+        if session_type() == "wayland":
+            shortcut = "configured by desktop portal"
+        elif self.macro_hotkey_combo:
+            shortcut = format_combo(*self.macro_hotkey_combo)
+        else:
+            shortcut = "not assigned"
+        self._macro_hotkey_status_var.set(f"Macro: {macro_name}; shortcut: {shortcut}")
+
+    def _choose_hotkey_macro(self):
+        selection = self._macro_listbox.curselection()
+        if not selection:
+            messagebox.showerror("No macro selected", "Select a saved macro first.")
+            return
+        self.macro_hotkey_name = self._macro_listbox.get(selection[0])
+        self._save_macro_hotkey()
+        self._refresh_macro_hotkey_status()
+
+    def _set_macro_hotkey(self):
+        if not self.macro_hotkey_name:
+            self._choose_hotkey_macro()
+            if not self.macro_hotkey_name:
+                return
+        if session_type() == "wayland":
+            if self._portal_shortcuts is None:
+                messagebox.showerror("Can't set macro hotkey", self._portal_shortcut_description)
+                return
+            try:
+                self._portal_shortcuts.configure()
+            except (GlobalShortcutsError, GLib.Error) as exc:
+                messagebox.showerror("Can't set macro hotkey", str(exc))
+            return
+        try:
+            source = self._ensure_input_source()
+        except RuntimeError as exc:
+            messagebox.showerror("Can't set macro hotkey", str(exc))
+            return
+        self._set_macro_hotkey_btn.config(state="disabled")
+        self._macro_hotkey_status_var.set("Press a key combination… (Esc to cancel)")
+        self._macro_hotkey_capture = HotkeyCapture(source)
+        self._macro_hotkey_capture.start()
+        self._poll_macro_hotkey_capture()
+
+    def _poll_macro_hotkey_capture(self):
+        capture = self._macro_hotkey_capture
+        if capture is None:
+            return
+        if capture.result is None:
+            self.root.after(100, self._poll_macro_hotkey_capture)
+            return
+        result = capture.result
+        capture.close()
+        self._macro_hotkey_capture = None
+        modifiers, key_code = result
+        if key_code != e.KEY_ESC or modifiers:
+            try:
+                self._start_macro_hotkey_listener(result)
+                self._save_macro_hotkey()
+            except HotkeyError as exc:
+                messagebox.showerror("Can't set macro hotkey", str(exc))
+        if self._settings_open():
+            self._set_macro_hotkey_btn.config(state="normal")
+            self._refresh_macro_hotkey_status()
+
     def _refresh_macro_list(self):
         self._macro_listbox.delete(0, "end")
         for name in Macro.list_names():
@@ -513,12 +727,31 @@ class ClickyClickApp:
         name = name.strip()
         if not name:
             return
-        if Macro.exists(name):
+        try:
+            already_exists = Macro.exists(name)
+        except MacroError as exc:
+            messagebox.showerror("Invalid macro name", str(exc))
+            return
+        if already_exists:
             if not messagebox.askyesno("Overwrite?", f"A macro named {name!r} already exists. Overwrite it?"):
                 return
         try:
-            source = self._ensure_privileged_input()
-        except PrivilegedInputError as exc:
+            source = self._ensure_input_source()
+        except InputAccessRequired:
+            if not messagebox.askyesno(
+                "One-time setup",
+                "System-wide recording on Wayland needs one-time input access. "
+                "Install it now? You will be asked for administrator confirmation once; "
+                "no logout or future password prompts are required.",
+            ):
+                return
+            try:
+                install_input_access()
+                source = self._ensure_input_source()
+            except (InputSetupError, InputAccessRequired, OSError) as exc:
+                messagebox.showerror("Input setup failed", str(exc))
+                return
+        except RuntimeError as exc:
             messagebox.showerror("Can't record", str(exc))
             return
 
@@ -550,7 +783,15 @@ class ClickyClickApp:
         name = self._pending_macro_name
         self._pending_macro_name = None
         macro = Macro(name=name, steps=steps, loop_count=0)
-        macro.save()
+        try:
+            macro.save()
+        except (MacroError, OSError, ValueError) as exc:
+            messagebox.showerror("Can't save macro", str(exc))
+            if self._settings_open():
+                self._record_btn.config(state="normal")
+                self._play_btn.config(state="normal")
+                self._macro_status_var.set("Recording could not be saved.")
+            return
         if self._settings_open():
             self._record_btn.config(state="normal")
             self._play_btn.config(state="normal")
@@ -576,6 +817,9 @@ class ClickyClickApp:
         if macro.loop_count < 0:
             messagebox.showerror("Invalid loop count", "Loop count can't be negative.")
             return
+        self._start_macro_playback(macro, name)
+
+    def _start_macro_playback(self, macro, name):
         if self.backend is None:
             self._show_backend_error()
             return
@@ -587,13 +831,21 @@ class ClickyClickApp:
 
         self._macro_stop_event.clear()
         self._macro_running = True
-        self._play_btn.config(state="disabled")
-        self._stop_macro_btn.config(state="normal")
-        self._macro_status_var.set(f"Playing {name!r}…")
+        if self._settings_open():
+            self._play_btn.config(state="disabled")
+            self._stop_macro_btn.config(state="normal")
+            self._macro_status_var.set(f"Playing {name!r}…")
 
         player = MacroPlayer(self.backend, self._macro_stop_event, self._ui_queue)
-        self._macro_thread = threading.Thread(target=player.play, args=(macro,), daemon=True)
+        self._macro_thread = threading.Thread(target=self._play_macro, args=(player, macro), daemon=True)
         self._macro_thread.start()
+
+    def _play_macro(self, player, macro):
+        try:
+            player.play(macro)
+        except Exception as exc:
+            self._ui_queue.put(("runtime_error", f"Macro playback stopped: {exc}"))
+            self._ui_queue.put(("macro_stopped", 0))
 
     def _on_stop_macro(self):
         self._macro_stop_event.set()
@@ -605,6 +857,10 @@ class ClickyClickApp:
         name = self._macro_listbox.get(sel[0])
         if messagebox.askyesno("Delete macro", f"Delete {name!r}?"):
             Macro.delete(name)
+            if self.macro_hotkey_name == name:
+                self.macro_hotkey_name = None
+                self._save_macro_hotkey()
+                self._refresh_macro_hotkey_status()
             self._refresh_macro_list()
 
     # ---- About tab ----
@@ -632,10 +888,16 @@ class ClickyClickApp:
             self._macro_thread.join(timeout=0.5)
         if self._hotkey_capture is not None:
             self._hotkey_capture.cancel()
+        if self._macro_hotkey_capture is not None:
+            self._macro_hotkey_capture.cancel()
         if self.hotkey_listener is not None:
             self.hotkey_listener.close()
-        if self._privileged_input is not None:
-            self._privileged_input.close()
+        if self.macro_hotkey_listener is not None:
+            self.macro_hotkey_listener.close()
+        if self._input_source is not None:
+            self._input_source.close()
+        if self._portal_shortcuts is not None:
+            self._portal_shortcuts.close()
         if self.backend:
             self.backend.close()
         self.root.destroy()

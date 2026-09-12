@@ -2,7 +2,7 @@
 
 > **Picking this up after a break?** Check [HANDOFF.md](HANDOFF.md) first — it tracks the current open issue and hard-won lessons from the last debugging session, so they don't get re-learned or undone by accident.
 
-A configurable auto clicker and macro tool for Linux, built for Wayland (KDE Plasma). Clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using the real `libei`/EIS protocol — the same mechanism screen-sharing and remote-control tools use, and the compositor's actual sanctioned channel for this on Wayland. The global start/stop hotkey, by contrast, is assigned and detected entirely inside this app by reading a keyboard device directly — nothing is ever registered with KDE's shortcut system, so there's nothing left behind when ClickyClick closes.
+A configurable auto clicker and macro tool for Linux with runtime-selected X11 and Wayland backends. On Wayland, clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using `libei`/EIS, and the global start/stop action uses the standard `GlobalShortcuts` portal. On X11, ClickyClick uses the X server through `pynput`. Normal operation never launches `pkexec`, never changes group membership, requires no logout, and asks for no administrator password.
 
 This isn't the first thing that was tried. `uinput` (what `ydotool` uses) creates a real kernel-level virtual mouse, but KWin accepts synthetic *keyboard* input from it while silently dropping synthetic *pointer* input (clicks and motion) — confirmed by hand, not assumed. X11-style injection (`xdotool`/`pynput`, XTest) is blocked outright on Wayland. The portal's own plain D-Bus methods (`NotifyPointerButton` etc.) also silently no-op on this KWin version. Negotiating a proper portal session and injecting through the real EIS protocol is the one path that actually works.
 
@@ -46,17 +46,29 @@ Or symlink `clickyclick.desktop` into `~/.local/share/applications/` to launch i
 - One Start/Stop button — the same action starts and stops (also `F6` or `Esc` while the window has focus)
 - A configurable global hotkey that works regardless of which window has focus (see below)
 - Record, save, and play back macros — sequences of clicks, moves, and keystrokes (see below)
+- A separate configurable global macro hotkey: choose a saved macro, then use the same shortcut to start and stop it
+- An always-visible **Stop All** button and in-window **Esc** emergency stop
 
 ## Global hotkey
 
-Configured from **Settings → Hotkey**. Click "Set Hotkey…", then press whatever key or combination (e.g. `Ctrl+F6`) you want — captured directly by this app, no KDE dialog involved. Once set, that combination toggles Start/Stop from anywhere, including while a game or another window has focus.
-
-This is deliberately *not* the `GlobalShortcuts` XDG portal (the usual sanctioned way to do this on Wayland): that requires KDE's own native "assign a key" dialog and registers a persistent, app-identified shortcut that shows up in KDE's own Shortcuts settings and outlives the process. Reading a keyboard device directly instead means the whole thing lives only in this app's memory for as long as it's running — closing or killing ClickyClick leaves nothing registered anywhere to revert. Your chosen combination is remembered locally (`~/.config/clickyclick/hotkey.json`, this app's own preference file — not KDE's) so you don't have to reassign it every launch, but re-detecting it each time is a fresh in-process read, not a standing system registration.
-
-Reading a keyboard device directly needs root (there's no portal for *observing* general input the way RemoteDesktop covers *injecting* it above) — same requirement as macro recording below. This used to be solved by putting your account in the `input` group, but that needs a real logout to take effect for any given process, no matter how it's granted (a hard property of how Linux group membership works, not a bug to route around — a `newgrp`-based attempt to skip it turned out to permanently break the RemoteDesktop session in the same process instead, which is worse). So instead: the first time you use "Set Hotkey…" or "Record New…" in a given run of the app, it starts a tiny, fixed-behavior root helper (`input_reader_helper.py`) via `pkexec` — a native password dialog, same as any other `pkexec` use, your password goes there and never through the app. That one helper is then reused for the rest of the app's run, so this is at most one prompt per launch, covering both features, and it **never** requires a logout, because your own account's credentials never change at all.
+Configured from **Settings → Hotkey**. On Wayland, the desktop's standard shortcut dialog assigns the key and the portal delivers it regardless of focus. On X11, ClickyClick captures and listens for the combination directly through the X server. Neither path needs administrator privileges.
 
 ## Macros
 
 Configured from **Settings → Macros**. "Record New…" captures real mouse clicks, movement, and keystrokes as you perform them, until you press **F9** to stop (a dedicated key rather than a clickable button, since a click on a "Stop" button would itself be indistinguishable from any other recorded click). Recorded macros are saved as JSON under `~/.config/clickyclick/macros/` and can be played back with a configurable loop count.
 
-Recording reads raw input devices directly, which needs the same root helper as the hotkey above (and shares the same running instance of it, if one's already been started this session).
+System-wide recording is password-free on X11. On Wayland, the first recording asks to install a small persistent udev `uaccess` rule. This produces one administrator confirmation, applies immediately without logout, and gives the active local desktop session access to keyboard and mouse event devices. Later launches do not ask again. The application itself always remains unprivileged.
+
+To control playback globally, select a saved macro in **Settings → Macros**, click **Use Selected Macro**, then click **Set Toggle Hotkey…**. Pressing that shortcut starts the chosen macro; pressing it again stops it. Macro playback can also be stopped from the Macros tab, with the main-window **Stop All** button, or with **Esc** while ClickyClick is focused.
+
+Raw input access is powerful: any application running as your active desktop user can use the resulting device ACLs, not only ClickyClick. Remove `/etc/udev/rules.d/70-clickyclick-input.rules` as administrator and reload udev rules to revoke it.
+
+## Compatibility
+
+| Session | Clicking/playback | Global hotkey | Passive recording |
+|---|---|---|---|
+| X11 (any desktop/window manager) | Yes | Yes | Yes |
+| Wayland with RemoteDesktop + GlobalShortcuts portals | Yes | Yes | Yes, after one-time input-access setup |
+| Wayland missing either required portal | Capability is reported unavailable | Capability is reported unavailable | No |
+
+KDE Plasma and current GNOME versions are the primary portal targets. COSMIC and other compositors become supported automatically as their portal backends expose the required standard output and shortcut interfaces; recording is independent of the compositor after one-time setup.

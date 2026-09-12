@@ -1,5 +1,14 @@
 # Handoff notes
 
+## Architecture update: password-free cross-session backends
+
+The application now selects its backend at runtime. X11 uses `pynput` for
+output and global observation; Wayland keeps RemoteDesktop/EIS output, uses
+the GlobalShortcuts portal, and records through non-root evdev access after a
+one-time udev `uaccess` installation. The old always-root Python event-stream
+helper has been deleted and must not be restored. See README.md and ROADMAP.md
+for the current support matrix.
+
 Status snapshot for whoever (human or AI) picks this project up next. Written
 2026-09-12 after a long session that fixed several real bugs but left one
 open. Check `git log` for the authoritative history — this file explains the

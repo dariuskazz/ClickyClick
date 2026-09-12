@@ -1,14 +1,8 @@
-"""In-app global hotkey: captured and detected entirely within this
-process from a shared raw-input event stream (see privileged_input.py),
-not registered with the compositor or KDE's shortcut system at all.
+"""Password-free X11 global hotkey capture and detection.
 
-This is deliberately NOT the GlobalShortcuts XDG portal: that requires
-KDE's own native "assign a key" dialog and registers a persistent,
-app-identified shortcut that shows up in KDE's own Shortcuts settings and
-outlives this process. Reading the keyboard directly instead means the
-whole thing lives only in this process's memory for as long as it runs --
-closing ClickyClick (or killing it) leaves nothing behind to revert, and
-the key is assigned through this app's own UI, never KDE's.
+Wayland uses the standard GlobalShortcuts portal instead. This module is
+used only where the X server permits global observation without administrator
+access.
 """
 
 import threading

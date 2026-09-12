@@ -1,0 +1,1 @@
+"""ClickyClick test suite."""
