@@ -4,6 +4,12 @@
 
 A configurable auto clicker and macro tool for Linux with runtime-selected X11 and Wayland backends. On Wayland, clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using `libei`/EIS, and the global start/stop action uses the standard `GlobalShortcuts` portal. On X11, ClickyClick uses the X server through `pynput`. After the optional one-time Wayland recording setup, normal operation needs no administrator password or logout.
 
+## Screenshots
+
+| Main window | Macro settings |
+|---|---|
+| ![ClickyClick main window](screenshots/clickyclick-main-window.png) | ![ClickyClick macro settings with global start and stop shortcut](screenshots/clickyclick-macro-settings.png) |
+
 ## Setup
 
 ### Ubuntu, Debian, Linux Mint, and Pop!_OS
