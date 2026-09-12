@@ -33,7 +33,7 @@ This writes the same `kde-authorized`/`remote-desktop` permission-store entry th
 ./run.sh
 ```
 
-Or install `clickyclick.desktop` to `~/.local/share/applications/` to launch it from your application menu.
+Or symlink `clickyclick.desktop` into `~/.local/share/applications/` to launch it from your application menu — `ln -s "$(pwd)/clickyclick.desktop" ~/.local/share/applications/clickyclick.desktop`. Symlink rather than copy: a copy silently stops matching this file (name, icon, anything else) the moment either one changes, and KDE's app menu caches whatever it last read regardless — if you edit this file after installing it, refresh that cache with `kbuildsycoca6 --noincremental` (no logout needed).
 
 ## Features
 
