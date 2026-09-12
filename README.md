@@ -1,5 +1,7 @@
 # ClickyClick
 
+> **Picking this up after a break?** Check [HANDOFF.md](HANDOFF.md) first — it tracks the current open issue and hard-won lessons from the last debugging session, so they don't get re-learned or undone by accident.
+
 A configurable auto clicker and macro tool for Linux, built for Wayland (KDE Plasma). Clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using the real `libei`/EIS protocol — the same mechanism screen-sharing and remote-control tools use, and the compositor's actual sanctioned channel for this on Wayland. The global start/stop hotkey, by contrast, is assigned and detected entirely inside this app by reading a keyboard device directly — nothing is ever registered with KDE's shortcut system, so there's nothing left behind when ClickyClick closes.
 
 This isn't the first thing that was tried. `uinput` (what `ydotool` uses) creates a real kernel-level virtual mouse, but KWin accepts synthetic *keyboard* input from it while silently dropping synthetic *pointer* input (clicks and motion) — confirmed by hand, not assumed. X11-style injection (`xdotool`/`pynput`, XTest) is blocked outright on Wayland. The portal's own plain D-Bus methods (`NotifyPointerButton` etc.) also silently no-op on this KWin version. Negotiating a proper portal session and injecting through the real EIS protocol is the one path that actually works.
