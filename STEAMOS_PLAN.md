@@ -1,5 +1,23 @@
 # ClickyClick SteamOS Game Mode implementation plan
 
+## Current implementation status
+
+The first private preview now includes:
+
+- SteamOS Game/Desktop Mode detection.
+- Steam Deck, Legion Go S and generic controller profiles.
+- Runtime controller capability discovery.
+- Plain-language control names.
+- In-app controller chord capture and private persistent bindings.
+- Model-specific defaults and two-second safety holds.
+- Background recording countdown and controller emergency stop.
+- A separate SteamOS Preview launcher suitable for adding to Steam.
+- Automated tests for detection, naming, capture, activation and persistence.
+
+Gamescope output verification, native controller-event playback, controller
+diagrams, notifications, Flatpak packaging and physical-device validation are
+still pending. These depend on iterative testing on actual SteamOS handhelds.
+
 ## Goal
 
 Run ClickyClick from SteamOS Game Mode on supported handhelds, configure it

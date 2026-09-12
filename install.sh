@@ -5,6 +5,7 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$APP_DIR/venv"
 APPLICATIONS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 DESKTOP_FILE="$APPLICATIONS_DIR/clickyclick.desktop"
+STEAMOS_DESKTOP_FILE="$APPLICATIONS_DIR/clickyclick-steamos.desktop"
 
 python3 -m venv --system-site-packages "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
@@ -21,6 +22,12 @@ sed \
     "$APP_DIR/clickyclick.desktop" > "$DESKTOP_FILE"
 chmod 644 "$DESKTOP_FILE"
 
+sed \
+    -e "s|@EXEC@|$APP_DIR/run-steamos.sh|g" \
+    -e "s|@ICON@|$APP_DIR/assets/icon.png|g" \
+    "$APP_DIR/clickyclick-steamos.desktop" > "$STEAMOS_DESKTOP_FILE"
+chmod 644 "$STEAMOS_DESKTOP_FILE"
+
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$APPLICATIONS_DIR" >/dev/null 2>&1 || true
 fi
@@ -30,3 +37,5 @@ fi
 
 echo "ClickyClick is installed. Start it from the application menu or run:"
 echo "  $APP_DIR/run.sh"
+echo "SteamOS controller preview:"
+echo "  $APP_DIR/run-steamos.sh"

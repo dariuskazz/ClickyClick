@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import json
+import os
 import queue
 import signal
 import threading
 import tkinter as tk
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
@@ -13,12 +15,14 @@ gi.require_version("Gio", "2.0")
 from evdev import ecodes as e
 
 from hotkey import HotkeyCapture, HotkeyError, HotkeyListener, format_combo
+from controller_bindings import ACTIONS, BindingStore, ChordCapture, ChordListener, ControllerBinding
 from evdev_input import InputAccessRequired
 from input_access_setup import InputSetupError, install_input_access
 from input_backend import BackendUnavailable
 from macro import Macro, MacroError, MacroPlayer
 from recorder import MacroRecorder
 from session_backend import create_input_source, create_output_backend, session_type
+from steamos import detect_environment, list_controllers
 
 BACKEND_ERROR_MSG_TEMPLATE = (
     "Couldn't set up a RemoteDesktop session with the compositor:\n\n"
@@ -59,6 +63,16 @@ class ClickyClickApp:
         self._pending_macro_name = None
 
         self._settings_win = None
+        self.steam_environment = detect_environment()
+        self.controllers = list_controllers()
+        self.steamos_mode = self.steam_environment.is_game_mode or bool(os.environ.get("CLICKYCLICK_STEAMOS_PREVIEW"))
+        self._controller_store = BindingStore()
+        self._controller_bindings = self._controller_store.load()
+        self._controller_listeners = []
+        self._controller_capture = None
+        self._controller_capture_action = None
+        self._controller_status_var = None
+        self._install_default_controller_bindings()
 
         # Installed before backend/UI setup so the global-hotkey signal is
         # handled from the earliest possible moment after launch.
@@ -87,6 +101,7 @@ class ClickyClickApp:
         self._build_vars()
         self._build_ui()
         self._load_macro_hotkey()
+        self._start_controller_listeners()
         self._pump_queue()
 
         if self._backend_error:
@@ -118,6 +133,10 @@ class ClickyClickApp:
         pad = {"padx": 8, "pady": 6}
         main = ttk.Frame(self.root, padding=10)
         main.grid(row=0, column=0, sticky="nsew")
+
+        if self.steamos_mode:
+            self.root.title("ClickyClick — SteamOS Preview")
+            self.root.tk.call("tk", "scaling", 1.5)
 
         interval_frame = ttk.LabelFrame(main, text="Click Interval")
         interval_frame.grid(row=0, column=0, sticky="ew", **pad)
@@ -217,6 +236,94 @@ class ClickyClickApp:
                 raise InputSetupError("Input access setup was cancelled.")
             install_input_access()
             return self._ensure_input_source()
+
+    # ---------- SteamOS controller controls ----------
+    def _controller_profile(self):
+        return self.controllers[0].profile if self.controllers else "generic"
+
+    def _install_default_controller_bindings(self):
+        if self._controller_bindings or not self.controllers:
+            return
+        profile = self._controller_profile()
+        available = set(self.controllers[0].button_codes)
+        if profile == "steam_deck":
+            proposed = {
+                "record": ControllerBinding(frozenset({e.BTN_TRIGGER_HAPPY1, e.BTN_TRIGGER_HAPPY3}), 2),
+                "macro": ControllerBinding(frozenset({e.BTN_TRIGGER_HAPPY2, e.BTN_TRIGGER_HAPPY4})),
+                "autoclick": ControllerBinding(frozenset({e.BTN_TRIGGER_HAPPY1, e.BTN_TRIGGER_HAPPY4})),
+                "emergency_stop": ControllerBinding(frozenset({e.BTN_TRIGGER_HAPPY2, e.BTN_TRIGGER_HAPPY3}), 2),
+            }
+            if all(binding.buttons.issubset(available) for binding in proposed.values()):
+                self._controller_bindings = proposed
+        elif profile == "legion_go_s":
+            rear = {e.BTN_TRIGGER_HAPPY1, e.BTN_TRIGGER_HAPPY2}
+            proposed = {
+                "record": ControllerBinding(frozenset(rear | {e.BTN_NORTH}), 2),
+                "macro": ControllerBinding(frozenset(rear | {e.BTN_WEST})),
+                "autoclick": ControllerBinding(frozenset(rear | {e.BTN_SOUTH})),
+                "emergency_stop": ControllerBinding(frozenset(rear | {e.BTN_EAST}), 2),
+            }
+            if all(binding.buttons.issubset(available) for binding in proposed.values()):
+                self._controller_bindings = proposed
+        if self._controller_bindings:
+            self._controller_store.save(self._controller_bindings)
+
+    def _start_controller_listeners(self):
+        for listener in self._controller_listeners:
+            listener.close()
+        self._controller_listeners = []
+        if not self._controller_bindings:
+            return
+        try:
+            source = self._ensure_input_source()
+        except RuntimeError:
+            return
+        for action, binding in self._controller_bindings.items():
+            listener = ChordListener(
+                source, binding,
+                lambda selected=action: self._ui_queue.put(("controller_action", selected)),
+            )
+            listener.start()
+            self._controller_listeners.append(listener)
+
+    def _run_controller_action(self, action):
+        if action == "emergency_stop":
+            self._stop_all()
+            if self._recording and self._recorder is not None:
+                self._recorder.stop()
+            self.status_var.set("Stopped by controller emergency shortcut")
+            self.root.bell()
+        elif action == "autoclick":
+            self._toggle_start_stop()
+        elif action == "macro":
+            self._toggle_macro_hotkey()
+        elif action == "record":
+            self._toggle_game_recording()
+
+    def _toggle_game_recording(self):
+        if self._recording:
+            self._recorder.stop()
+            return
+        try:
+            source = self._ensure_hotkey_input_source()
+        except (InputSetupError, RuntimeError, OSError) as exc:
+            messagebox.showerror("Can't record", str(exc))
+            return
+        self._pending_macro_name = datetime.now().strftime("Game recording %Y-%m-%d %H-%M-%S")
+        self.status_var.set("Recording starts in 5 seconds… return to the game")
+        self.root.bell()
+        self.root.after(5000, lambda: self._begin_game_recording(source))
+
+    def _begin_game_recording(self, source):
+        if self._recording:
+            return
+        self._recorder = MacroRecorder(source, self.root.winfo_pointerxy)
+        self._recorder.start()
+        self._recording = True
+        self.status_var.set("Recording game actions… use the controller shortcut to stop")
+        self.root.iconify()
+        self.root.bell()
+        self.root.after(100, self._poll_recorder)
 
     def _load_and_start_hotkey(self):
         try:
@@ -451,6 +558,8 @@ class ClickyClickApp:
                     messagebox.showerror("ClickyClick error", payload)
                 elif kind == "toggle_macro":
                     self._toggle_macro_hotkey()
+                elif kind == "controller_action":
+                    self._run_controller_action(payload)
         except queue.Empty:
             pass
         self.root.after(50, self._pump_queue)
@@ -479,9 +588,116 @@ class ClickyClickApp:
         notebook.add(macros_tab, text="Macros")
         self._build_macros_tab(macros_tab)
 
+        if self.steamos_mode or self.controllers:
+            controller_tab = ttk.Frame(notebook, padding=12)
+            notebook.add(controller_tab, text="Controller")
+            self._build_controller_tab(controller_tab)
+
         about_tab = ttk.Frame(notebook, padding=12)
         notebook.add(about_tab, text="About")
         self._build_about_tab(about_tab)
+
+    def _build_controller_tab(self, parent):
+        controller = self.controllers[0] if self.controllers else None
+        device_text = controller.description if controller else "No game controller detected"
+        ttk.Label(parent, text="SteamOS controller setup", font=("", 12, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+        ttk.Label(
+            parent,
+            text=f"Mode: {self.steam_environment.description}\nDevice: {device_text}",
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 12))
+
+        labels = {
+            "record": "Start / stop recording",
+            "macro": "Start / stop selected macro",
+            "autoclick": "Start / stop auto clicker",
+            "emergency_stop": "Emergency Stop All",
+        }
+        self._controller_binding_vars = {}
+        for row, action in enumerate(ACTIONS, start=2):
+            ttk.Label(parent, text=labels[action]).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=5)
+            binding = self._controller_bindings.get(action)
+            text = binding.describe(self._controller_profile()) if binding else "Not assigned"
+            variable = tk.StringVar(value=text)
+            self._controller_binding_vars[action] = variable
+            button = ttk.Button(
+                parent, textvariable=variable, width=46,
+                command=lambda selected=action: self._begin_controller_capture(selected),
+            )
+            button.grid(row=row, column=1, sticky="ew", pady=5)
+
+        self._controller_status_var = tk.StringVar(
+            value="Select an action, then press and release the controller buttons you want to use."
+        )
+        ttk.Label(
+            parent, textvariable=self._controller_status_var, wraplength=570,
+            justify="left", foreground="#0a7a4a",
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(12, 4))
+        ttk.Label(
+            parent,
+            text="Recording and Emergency Stop require a two-second hold. Avoid Steam and Quick Access buttons.",
+            wraplength=570, justify="left", foreground="#666666",
+        ).grid(row=7, column=0, columnspan=2, sticky="w")
+
+    def _begin_controller_capture(self, action):
+        if self._controller_capture is not None:
+            self._controller_capture.close()
+        for listener in self._controller_listeners:
+            listener.close()
+        self._controller_listeners = []
+        try:
+            source = self._ensure_hotkey_input_source()
+        except (InputSetupError, RuntimeError, OSError) as exc:
+            messagebox.showerror("Can't read controller", str(exc))
+            self._start_controller_listeners()
+            return
+        self._controller_capture_action = action
+        self._controller_capture = ChordCapture(source)
+        self._controller_capture.start()
+        self._controller_status_var.set("Listening… press the combination together, then release every button.")
+        self.root.after(50, self._poll_controller_capture)
+
+    def _poll_controller_capture(self):
+        capture = self._controller_capture
+        if capture is None:
+            return
+        if capture.result is None:
+            if self._settings_open():
+                self.root.after(50, self._poll_controller_capture)
+            else:
+                capture.close()
+                self._controller_capture = None
+                self._start_controller_listeners()
+            return
+        buttons = capture.result
+        capture.close()
+        action = self._controller_capture_action
+        self._controller_capture = None
+        self._controller_capture_action = None
+        if len(buttons) < 2 and not messagebox.askyesno(
+            "Single-button shortcut",
+            "A single button is easy to activate accidentally in a game. Use it anyway?",
+            parent=self._settings_win,
+        ):
+            self._controller_status_var.set("Shortcut was not changed.")
+            self._start_controller_listeners()
+            return
+        hold = 2.0 if action in {"record", "emergency_stop"} else 0.0
+        binding = ControllerBinding(buttons, hold)
+        duplicate = next((name for name, current in self._controller_bindings.items()
+                          if name != action and current.buttons == buttons), None)
+        if duplicate:
+            messagebox.showerror("Shortcut already used", "That combination is assigned to another action.")
+            self._controller_status_var.set("Choose a different combination.")
+            self._start_controller_listeners()
+            return
+        self._controller_bindings[action] = binding
+        self._controller_store.save(self._controller_bindings)
+        self._controller_binding_vars[action].set(binding.describe(self._controller_profile()))
+        self._controller_status_var.set("Saved. This shortcut now works while the game is visible.")
+        self._start_controller_listeners()
 
     # ---- Hotkey tab ----
     def _build_hotkey_tab(self, parent):
@@ -746,6 +962,8 @@ class ClickyClickApp:
             self._play_btn.config(state="normal")
             self._macro_status_var.set(f"Saved {name!r} with {len(steps)} step(s).")
             self._refresh_macro_list()
+        self.status_var.set(f"Saved {name} — {len(steps)} actions")
+        self.root.bell()
 
     def _on_play_macro(self):
         sel = self._macro_listbox.curselection()
@@ -840,6 +1058,10 @@ class ClickyClickApp:
             self._hotkey_capture.cancel()
         if self._macro_hotkey_capture is not None:
             self._macro_hotkey_capture.cancel()
+        if self._controller_capture is not None:
+            self._controller_capture.close()
+        for listener in self._controller_listeners:
+            listener.close()
         if self.hotkey_listener is not None:
             self.hotkey_listener.close()
         if self.macro_hotkey_listener is not None:

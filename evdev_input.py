@@ -15,6 +15,8 @@ class InputAccessRequired(RuntimeError):
 
 def _classify(device):
     keys = device.capabilities().get(e.EV_KEY, [])
+    if e.EV_ABS in device.capabilities() and any(code in keys for code in (e.BTN_GAMEPAD, e.BTN_SOUTH)):
+        return "gamepad"
     if e.BTN_LEFT in keys:
         return "mouse"
     if e.KEY_A in keys and e.KEY_ENTER in keys:
@@ -52,7 +54,7 @@ class EvdevInputSource:
             opened += 1
         if require_device and not self._devices:
             raise InputAccessRequired(
-                "One-time input access setup is required for system-wide recording on Wayland."
+                "One-time input access setup is required for system-wide controls on Wayland or SteamOS."
             )
         return opened
 

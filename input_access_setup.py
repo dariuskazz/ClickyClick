@@ -10,6 +10,7 @@ RULE = """# ClickyClick: active local session access; installed with user approv
 SUBSYSTEM==\"input\", KERNEL==\"event*\", ENV{ID_INPUT_KEYBOARD}==\"1\", TAG+=\"uaccess\"
 SUBSYSTEM==\"input\", KERNEL==\"event*\", ENV{ID_INPUT_MOUSE}==\"1\", TAG+=\"uaccess\"
 SUBSYSTEM==\"input\", KERNEL==\"event*\", ENV{ID_INPUT_TOUCHPAD}==\"1\", TAG+=\"uaccess\"
+SUBSYSTEM==\"input\", KERNEL==\"event*\", ENV{ID_INPUT_JOYSTICK}==\"1\", TAG+=\"uaccess\"
 """
 
 

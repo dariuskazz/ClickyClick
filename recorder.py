@@ -92,6 +92,11 @@ class MacroRecorder:
                     Step(type="click", delay_ms=self._delay_since_last_step(), x=x, y=y, button=button)
                 )
             return
+        if tag != "kbd":
+            # Controller command buttons are handled separately. Steam Input
+            # mappings that produce mouse/keyboard events are recorded through
+            # their corresponding virtual devices.
+            return
         if value == 1:
             self.steps.append(Step(type="key_down", delay_ms=self._delay_since_last_step(), key=e.KEY[code]))
         elif value == 0:

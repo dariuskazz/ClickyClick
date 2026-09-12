@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ClickyClick SteamOS Preview
+Comment=Controller-friendly automatic clicker and macro tool
+Exec=@EXEC@
+Icon=@ICON@
+Terminal=false
+Categories=Game;Utility;

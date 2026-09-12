@@ -203,3 +203,21 @@ ClickyClick is free and open-source software licensed under the
 study, modify, and redistribute it under the terms of that license.
 
 Copyright © 2026 Darius Kazlauskas.
+
+## Private SteamOS preview
+
+This branch contains the early controller-friendly SteamOS application. After
+running `./install.sh`, launch **ClickyClick SteamOS Preview** from the
+application menu or add it to Steam as a non-Steam game. It can also be started
+directly:
+
+```bash
+./run-steamos.sh
+```
+
+The preview currently provides SteamOS/Game Mode detection, Steam Deck and
+Legion Go S profiles, generic controller discovery, plain-language control
+names, in-app controller-combination capture, persistent bindings, background
+recording countdown, macro/clicker toggles and hold-to-activate Emergency Stop.
+Gamescope output and native controller-event playback remain experimental work
+described in `STEAMOS_PLAN.md`.
