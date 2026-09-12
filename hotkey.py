@@ -1,9 +1,4 @@
-"""Password-free X11 global hotkey capture and detection.
-
-Wayland uses the standard GlobalShortcuts portal instead. This module is
-used only where the X server permits global observation without administrator
-access.
-"""
+"""In-app global hotkey capture and detection for X11 and Wayland."""
 
 import threading
 
