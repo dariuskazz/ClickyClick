@@ -124,10 +124,12 @@ From the ClickyClick directory:
 
 ```bash
 git pull --ff-only
-./venv/bin/pip install -r requirements.txt
+./install.sh
 ```
 
-Run `./install.sh` again after moving the downloaded folder so the application
+Running the installer again refreshes dependencies and the application-menu
+entry. It also automatically repairs the launcher symlink created by early
+ClickyClick versions. Run it again after moving the downloaded folder so the
 menu entry receives the new path.
 
 ### Distribution notes
