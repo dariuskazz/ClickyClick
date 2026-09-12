@@ -2,16 +2,156 @@
 
 > **Picking this up after a break?** Check [HANDOFF.md](HANDOFF.md) first — it tracks the current open issue and hard-won lessons from the last debugging session, so they don't get re-learned or undone by accident.
 
-A configurable auto clicker and macro tool for Linux with runtime-selected X11 and Wayland backends. On Wayland, clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using `libei`/EIS, and the global start/stop action uses the standard `GlobalShortcuts` portal. On X11, ClickyClick uses the X server through `pynput`. Normal operation never launches `pkexec`, never changes group membership, requires no logout, and asks for no administrator password.
+A configurable auto clicker and macro tool for Linux with runtime-selected X11 and Wayland backends. On Wayland, clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using `libei`/EIS, and the global start/stop action uses the standard `GlobalShortcuts` portal. On X11, ClickyClick uses the X server through `pynput`. After the optional one-time Wayland recording setup, normal operation needs no administrator password or logout.
 
 This isn't the first thing that was tried. `uinput` (what `ydotool` uses) creates a real kernel-level virtual mouse, but KWin accepts synthetic *keyboard* input from it while silently dropping synthetic *pointer* input (clicks and motion) — confirmed by hand, not assumed. X11-style injection (`xdotool`/`pynput`, XTest) is blocked outright on Wayland. The portal's own plain D-Bus methods (`NotifyPointerButton` etc.) also silently no-op on this KWin version. Negotiating a proper portal session and injecting through the real EIS protocol is the one path that actually works.
 
 ## Setup
 
+### Ubuntu, Debian, Linux Mint, and Pop!_OS
+
+Install the common dependencies:
+
 ```bash
-python3 -m venv venv
+sudo apt update
+sudo apt install git python3 python3-venv python3-tk python3-gi xdg-desktop-portal
+```
+
+On KDE Plasma also install:
+
+```bash
+sudo apt install xdg-desktop-portal-kde
+```
+
+On GNOME also install:
+
+```bash
+sudo apt install xdg-desktop-portal-gnome
+```
+
+Linux Mint Cinnamon normally uses `xdg-desktop-portal-xapp`; Pop!_OS COSMIC
+normally provides `xdg-desktop-portal-cosmic`. Keep the portal backend supplied
+by the desktop rather than replacing it with a backend for a different desktop.
+
+### Fedora
+
+```bash
+sudo dnf install git python3 python3-pip python3-tkinter python3-gobject xdg-desktop-portal
+```
+
+Install the matching desktop backend:
+
+```bash
+# KDE Plasma
+sudo dnf install xdg-desktop-portal-kde
+
+# GNOME
+sudo dnf install xdg-desktop-portal-gnome
+```
+
+### Arch Linux and Manjaro
+
+```bash
+sudo pacman -S --needed git python python-pip tk python-gobject libei xdg-desktop-portal
+```
+
+Install the matching backend:
+
+```bash
+# KDE Plasma
+sudo pacman -S --needed xdg-desktop-portal-kde
+
+# GNOME
+sudo pacman -S --needed xdg-desktop-portal-gnome
+
+# Sway and other wlroots desktops
+sudo pacman -S --needed xdg-desktop-portal-wlr
+```
+
+### openSUSE Tumbleweed and Leap
+
+```bash
+sudo zypper install git python3 python3-pip python3-tk python3-gobject xdg-desktop-portal
+```
+
+For KDE Plasma, also install the KDE portal package when it is available for
+your openSUSE release:
+
+```bash
+sudo zypper install xdg-desktop-portal-kde
+```
+
+### Download and install ClickyClick
+
+The following steps are the same on every distribution:
+
+```bash
+git clone https://github.com/dariuskazz/ClickyClick.git
+cd ClickyClick
+python3 -m venv --system-site-packages venv
 ./venv/bin/pip install -r requirements.txt
 ```
+
+Using `--system-site-packages` allows the virtual environment to use the
+distribution's tested PyGObject/GIO bindings while keeping ClickyClick's other
+Python dependencies isolated.
+
+Run it:
+
+```bash
+./run.sh
+```
+
+Install the application-menu launcher for the current user:
+
+```bash
+mkdir -p ~/.local/share/applications
+ln -sfn "$(pwd)/clickyclick.desktop" ~/.local/share/applications/clickyclick.desktop
+```
+
+On KDE Plasma, refresh the application index:
+
+```bash
+kbuildsycoca6 --noincremental
+```
+
+### First Wayland launch
+
+1. Approve the desktop's RemoteDesktop consent dialog. This is desktop consent,
+   not an administrator-password request. ClickyClick stores the returned
+   restore token for later launches.
+2. Assign the simple-click and macro shortcuts when the desktop's Global
+   Shortcuts dialog appears.
+3. The first time you record a macro, approve the one-time input-access setup.
+   It applies immediately, requires no logout, and is not requested on later
+   launches.
+
+X11 sessions do not need portal approval or the input-access installation.
+
+### Updating
+
+From the ClickyClick directory:
+
+```bash
+git pull --ff-only
+./venv/bin/pip install -r requirements.txt
+```
+
+Because the launcher is a symlink, code, name, and icon updates take effect
+without reinstalling the launcher. KDE users can run
+`kbuildsycoca6 --noincremental` after an icon or desktop-entry update.
+
+### Distribution notes
+
+- The commands above target currently supported releases. Older releases may
+  use versioned Python package names or portal versions without RemoteDesktop
+  or GlobalShortcuts support.
+- Native COSMIC Wayland clicking depends on the COSMIC portal/compositor
+  exposing RemoteDesktop input injection. Installation alone cannot add a
+  compositor capability that the desktop does not provide.
+- Minimal window-manager installations must include a working
+  `xdg-desktop-portal` backend for Wayland. X11 window managers do not require
+  a portal for ClickyClick.
 
 The first launch asks the compositor for permission (a real consent dialog) to inject pointer and keyboard input. Approval is remembered — a restore token is saved to `~/.config/clickyclick/restore_token` — so this normally only happens once.
 
@@ -29,21 +169,13 @@ Run the included one-time fix:
 
 This writes the same `kde-authorized`/`remote-desktop` permission-store entry that clicking "Allow" would (see [KDE's own docs on portal pre-authorization](https://develop.kde.org/docs/administration/portal-permissions/)) — the documented mechanism for pre-approving a portal request, used here because the bug prevents the interactive version of it from ever appearing. Harmless to run even if you don't hit the bug. If `xdg-desktop-portal-kde` was already running, restart it afterward so it picks up the change: `pkill -f xdg-desktop-portal-kde` (it restarts automatically on the next request).
 
-## Run
-
-```bash
-./run.sh
-```
-
-Or symlink `clickyclick.desktop` into `~/.local/share/applications/` to launch it from your application menu — `ln -s "$(pwd)/clickyclick.desktop" ~/.local/share/applications/clickyclick.desktop`. Symlink rather than copy: a copy silently stops matching this file (name, icon, anything else) the moment either one changes, and KDE's app menu caches whatever it last read regardless — if you edit this file after installing it, refresh that cache with `kbuildsycoca6 --noincremental` (no logout needed).
-
 ## Features
 
 - Interval in hours/minutes/seconds/milliseconds
 - Left/right/middle button, single/double click
 - Click at the current cursor position, or a fixed position (pick it with a 3-second countdown, or type coordinates)
 - Repeat forever or a fixed number of times
-- One Start/Stop button — the same action starts and stops (also `F6` or `Esc` while the window has focus)
+- One Start/Stop button for simple clicking (`F6` while focused); `Esc` is the emergency Stop All key
 - A configurable global hotkey that works regardless of which window has focus (see below)
 - Record, save, and play back macros — sequences of clicks, moves, and keystrokes (see below)
 - A separate configurable global macro hotkey: choose a saved macro, then use the same shortcut to start and stop it
@@ -72,3 +204,11 @@ Raw input access is powerful: any application running as your active desktop use
 | Wayland missing either required portal | Capability is reported unavailable | Capability is reported unavailable | No |
 
 KDE Plasma and current GNOME versions are the primary portal targets. COSMIC and other compositors become supported automatically as their portal backends expose the required standard output and shortcut interfaces; recording is independent of the compositor after one-time setup.
+
+## License
+
+ClickyClick is free and open-source software licensed under the
+[GNU General Public License version 3](LICENSE) (`GPL-3.0-only`). You may use,
+study, modify, and redistribute it under the terms of that license.
+
+Copyright © 2026 Darius Kazlauskas.

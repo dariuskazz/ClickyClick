@@ -9,7 +9,7 @@ one-time udev `uaccess` installation. The old always-root Python event-stream
 helper has been deleted and must not be restored. See README.md and ROADMAP.md
 for the current support matrix.
 
-Status snapshot for whoever (human or AI) picks this project up next. Written
+Status snapshot for whoever picks this project up next. Written
 2026-09-12 after a long session that fixed several real bugs but left one
 open. Check `git log` for the authoritative history — this file explains the
 *why* and the current open thread, not a changelog.
