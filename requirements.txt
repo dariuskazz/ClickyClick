@@ -1,3 +1,4 @@
 evdev>=1.6
 python-libei[portal]>=0.5.1
 pynput>=1.7.7
+PyGObject>=3.42
