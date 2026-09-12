@@ -221,3 +221,13 @@ names, in-app controller-combination capture, persistent bindings, background
 recording countdown, macro/clicker toggles and hold-to-activate Emergency Stop.
 Gamescope output and native controller-event playback remain experimental work
 described in `STEAMOS_PLAN.md`.
+
+### SteamOS preview screenshots
+
+| SteamOS preview main window | Controller setup |
+|---|---|
+| ![ClickyClick SteamOS preview main window](screenshots/steamos/steam-mode-main.png) | ![ClickyClick SteamOS controller setup with understandable action names](screenshots/steamos/controller-setup.png) |
+
+| Macro recording and playback controls |
+|---|
+| ![ClickyClick macro recording, playback and global toggle controls](screenshots/steamos/macro-controls.png) |
