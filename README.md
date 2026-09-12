@@ -2,7 +2,7 @@
 
 **Current version: 1.0**
 
-A configurable auto clicker and macro tool for Linux with runtime-selected X11 and Wayland backends. On Wayland, clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using `libei`/EIS, and the global start/stop action uses the standard `GlobalShortcuts` portal. On X11, ClickyClick uses the X server through `pynput`. After the optional one-time Wayland recording setup, normal operation needs no administrator password or logout.
+A configurable auto clicker and macro tool for Linux with runtime-selected X11 and Wayland backends. On Wayland, clicks and keystrokes are injected through the `RemoteDesktop` XDG portal using `libei`/EIS; global shortcuts are chosen entirely inside ClickyClick and detected through non-root input access. On X11, ClickyClick uses the X server through `pynput`. After the optional one-time Wayland input setup, normal operation needs no administrator password or logout.
 
 ## Screenshots
 
@@ -110,9 +110,9 @@ Run it:
 1. Approve the desktop's RemoteDesktop consent dialog. This is desktop consent,
    not an administrator-password request. ClickyClick stores the returned
    restore token for later launches.
-2. Assign the simple-click and macro shortcuts when the desktop's Global
-   Shortcuts dialog appears.
-3. The first time you record a macro, approve the one-time input-access setup.
+2. Choose the simple-click and macro shortcuts inside ClickyClick's Settings.
+3. The first time you set a shortcut or record a macro, approve the one-time
+   input-access setup.
    It applies immediately, requires no logout, and is not requested on later
    launches.
 
@@ -136,7 +136,7 @@ menu entry receives the new path.
 
 - The commands above target currently supported releases. Older releases may
   use versioned Python package names or portal versions without RemoteDesktop
-  or GlobalShortcuts support.
+  support.
 - Native COSMIC Wayland clicking depends on the COSMIC portal/compositor
   exposing RemoteDesktop input injection. Installation alone cannot add a
   compositor capability that the desktop does not provide.
@@ -174,7 +174,7 @@ This writes the same `kde-authorized`/`remote-desktop` permission-store entry th
 
 ## Global hotkey
 
-Configured from **Settings → Hotkey**. On Wayland, the desktop's standard shortcut dialog assigns the key and the portal delivers it regardless of focus. On X11, ClickyClick captures and listens for the combination directly through the X server. Neither path needs administrator privileges.
+Configured completely inside **Settings → Hotkey**: click **Set Hotkey…**, then press the desired combination. ClickyClick listens for it regardless of focus. X11 needs no administrator access; Wayland uses the one-time input-access setup shared with macro recording and does not open the desktop's shortcut settings.
 
 ## Macros
 
@@ -191,8 +191,8 @@ Raw input access is powerful: any application running as your active desktop use
 | Session | Clicking/playback | Global hotkey | Passive recording |
 |---|---|---|---|
 | X11 (any desktop/window manager) | Yes | Yes | Yes |
-| Wayland with RemoteDesktop + GlobalShortcuts portals | Yes | Yes | Yes, after one-time input-access setup |
-| Wayland missing either required portal | Capability is reported unavailable | Capability is reported unavailable | No |
+| Wayland with RemoteDesktop portal | Yes | Yes, after one-time input-access setup | Yes, after one-time input-access setup |
+| Wayland missing RemoteDesktop portal | Capability is reported unavailable | Yes, after one-time input-access setup | Yes, after one-time input-access setup |
 
 KDE Plasma and current GNOME versions are the primary portal targets. COSMIC and other compositors become supported automatically as their portal backends expose the required standard output and shortcut interfaces; recording is independent of the compositor after one-time setup.
 

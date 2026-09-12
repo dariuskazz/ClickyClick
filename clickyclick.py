@@ -10,7 +10,6 @@ from tkinter import messagebox, simpledialog, ttk
 
 import gi
 gi.require_version("Gio", "2.0")
-from gi.repository import GLib
 from evdev import ecodes as e
 
 from hotkey import HotkeyCapture, HotkeyError, HotkeyListener, format_combo
@@ -18,7 +17,6 @@ from evdev_input import InputAccessRequired
 from input_access_setup import InputSetupError, install_input_access
 from input_backend import BackendUnavailable
 from macro import Macro, MacroError, MacroPlayer
-from portal_shortcuts import GlobalShortcutsError, PortalGlobalShortcuts
 from recorder import MacroRecorder
 from session_backend import create_input_source, create_output_backend, session_type
 
@@ -77,8 +75,6 @@ class ClickyClickApp:
             self._backend_error = str(exc)
 
         self._input_source = None
-        self._portal_shortcuts = None
-        self._portal_shortcut_description = None
         self.hotkey_listener = None
         self.hotkey_combo = None  # (frozenset of modifier names, evdev key code)
         self._hotkey_capture = None
@@ -206,11 +202,23 @@ class ClickyClickApp:
             self._input_source = create_input_source()
         return self._input_source
 
+    def _ensure_hotkey_input_source(self):
+        """Return the shared input source, offering Wayland setup when needed."""
+        try:
+            return self._ensure_input_source()
+        except InputAccessRequired:
+            if not messagebox.askyesno(
+                "One-time setup",
+                "Global shortcuts on Wayland need one-time input access. Install it "
+                "now? You will be asked for administrator confirmation once; no "
+                "logout or future password prompts are required.",
+                parent=self._settings_win,
+            ):
+                raise InputSetupError("Input access setup was cancelled.")
+            install_input_access()
+            return self._ensure_input_source()
+
     def _load_and_start_hotkey(self):
-        if session_type() == "wayland":
-            self._portal_shortcut_description = "Connecting to desktop portal…"
-            self.root.after(200, self._begin_portal_shortcut)
-            return
         try:
             data = json.loads(HOTKEY_CONFIG_PATH.read_text())
             combo = (frozenset(data["modifiers"]), data["key_code"])
@@ -219,26 +227,7 @@ class ClickyClickApp:
         try:
             self._start_hotkey_listener(combo)
         except HotkeyError:
-            pass  # X11 listener could not be started; Settings shows "Not set"
-
-    def _begin_portal_shortcut(self):
-        threading.Thread(target=self._connect_portal_shortcut, daemon=True).start()
-
-    def _connect_portal_shortcut(self):
-        portal = None
-        try:
-            portal = PortalGlobalShortcuts()
-            descriptions = portal.bind(
-                lambda shortcut_id: self._ui_queue.put((
-                    "toggle_macro" if shortcut_id == "toggle_macro" else "toggle", None
-                ))
-            )
-        except (GlobalShortcutsError, GLib.Error, OSError) as exc:
-            if portal is not None:
-                portal.close()
-            self._ui_queue.put(("portal_hotkey", (None, f"Unavailable: {exc}")))
-            return
-        self._ui_queue.put(("portal_hotkey", (portal, descriptions)))
+            pass  # Input access is not ready; Settings lets the user enable it.
 
     def _start_hotkey_listener(self, combo):
         """combo: (frozenset of modifier names, evdev key code). Raises
@@ -265,9 +254,8 @@ class ClickyClickApp:
         try:
             data = json.loads(MACRO_HOTKEY_CONFIG_PATH.read_text())
             self.macro_hotkey_name = data["macro"]
-            if session_type() == "x11":
-                combo = (frozenset(data["modifiers"]), data["key_code"])
-                self._start_macro_hotkey_listener(combo)
+            combo = (frozenset(data["modifiers"]), data["key_code"])
+            self._start_macro_hotkey_listener(combo)
         except (OSError, ValueError, KeyError, HotkeyError):
             return
 
@@ -461,26 +449,11 @@ class ClickyClickApp:
                         self._macro_status_var.set(f"Stopped after {payload} step(s).")
                 elif kind == "runtime_error":
                     messagebox.showerror("ClickyClick error", payload)
-                elif kind == "portal_hotkey":
-                    self._portal_shortcuts, descriptions = payload
-                    if self._portal_shortcuts is not None:
-                        self.hotkey_combo = (frozenset(), e.KEY_F6)
-                        self._portal_shortcut_description = (
-                            f"Clicking: {descriptions.get('toggle_clicks', 'Assigned')}; "
-                            f"macro: {descriptions.get('toggle_macro', 'Assigned')}"
-                        )
-                    else:
-                        self._portal_shortcut_description = descriptions
-                    if self._settings_open():
-                        self._refresh_hotkey_status()
-                        self._refresh_macro_hotkey_status()
                 elif kind == "toggle_macro":
                     self._toggle_macro_hotkey()
         except queue.Empty:
             pass
         self.root.after(50, self._pump_queue)
-        if self._portal_shortcuts is not None:
-            self._portal_shortcuts.pump()
 
     # ---------- Settings window ----------
     def _settings_open(self):
@@ -525,9 +498,9 @@ class ClickyClickApp:
         ttk.Label(
             parent,
             text=(
-                "Works while another window has focus. On Wayland, assignment is handled "
-                "by the desktop's standard Global Shortcuts portal. On X11 it is detected "
-                "directly without administrator access."
+                "Works while another window has focus. Choose the shortcut here in "
+                "ClickyClick. Wayland needs the same one-time input-access setup used "
+                "for macro recording; X11 needs no administrator access."
             ),
             foreground="#666666",
             wraplength=320,
@@ -535,29 +508,15 @@ class ClickyClickApp:
         ).grid(row=3, column=0, sticky="w", pady=(10, 0))
 
     def _refresh_hotkey_status(self):
-        if session_type() == "wayland":
-            self._hotkey_status_var.set(
-                "Portal shortcut: " + (self._portal_shortcut_description or "Not configured")
-            )
-            return
         if self.hotkey_combo:
             self._hotkey_status_var.set(f"Currently set to: {format_combo(*self.hotkey_combo)}")
         else:
             self._hotkey_status_var.set("Not set.")
 
     def _on_set_hotkey(self):
-        if session_type() == "wayland":
-            if self._portal_shortcuts is None:
-                messagebox.showerror("Can't set hotkey", self._portal_shortcut_description or "Portal unavailable")
-                return
-            try:
-                self._portal_shortcuts.configure()
-            except (GlobalShortcutsError, GLib.Error) as exc:
-                messagebox.showerror("Can't set hotkey", str(exc))
-            return
         try:
-            source = self._ensure_input_source()
-        except RuntimeError as exc:
+            source = self._ensure_hotkey_input_source()
+        except (InputSetupError, RuntimeError, OSError) as exc:
             messagebox.showerror("Can't set hotkey", str(exc))
             return
         self._set_hotkey_btn.config(state="disabled")
@@ -653,9 +612,7 @@ class ClickyClickApp:
         if not hasattr(self, "_macro_hotkey_status_var"):
             return
         macro_name = self.macro_hotkey_name or "none selected"
-        if session_type() == "wayland":
-            shortcut = "configured by desktop portal"
-        elif self.macro_hotkey_combo:
+        if self.macro_hotkey_combo:
             shortcut = format_combo(*self.macro_hotkey_combo)
         else:
             shortcut = "not assigned"
@@ -675,18 +632,9 @@ class ClickyClickApp:
             self._choose_hotkey_macro()
             if not self.macro_hotkey_name:
                 return
-        if session_type() == "wayland":
-            if self._portal_shortcuts is None:
-                messagebox.showerror("Can't set macro hotkey", self._portal_shortcut_description)
-                return
-            try:
-                self._portal_shortcuts.configure()
-            except (GlobalShortcutsError, GLib.Error) as exc:
-                messagebox.showerror("Can't set macro hotkey", str(exc))
-            return
         try:
-            source = self._ensure_input_source()
-        except RuntimeError as exc:
+            source = self._ensure_hotkey_input_source()
+        except (InputSetupError, RuntimeError, OSError) as exc:
             messagebox.showerror("Can't set macro hotkey", str(exc))
             return
         self._set_macro_hotkey_btn.config(state="disabled")
@@ -898,8 +846,6 @@ class ClickyClickApp:
             self.macro_hotkey_listener.close()
         if self._input_source is not None:
             self._input_source.close()
-        if self._portal_shortcuts is not None:
-            self._portal_shortcuts.close()
         if self.backend:
             self.backend.close()
         self.root.destroy()
