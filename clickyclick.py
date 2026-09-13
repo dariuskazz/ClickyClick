@@ -13,6 +13,7 @@ gi.require_version("Gio", "2.0")
 from evdev import ecodes as e
 
 from hotkey import HotkeyCapture, HotkeyError, HotkeyListener, format_combo
+from i18n import LANGUAGES, translate
 from evdev_input import InputAccessRequired
 from input_access_setup import InputSetupError, install_input_access
 from input_backend import BackendUnavailable
@@ -36,6 +37,7 @@ APP_VERSION = "1.0"
 HOTKEY_CONFIG_PATH = Path.home() / ".config" / "clickyclick" / "hotkey.json"
 MACRO_HOTKEY_CONFIG_PATH = Path.home() / ".config" / "clickyclick" / "macro_hotkey.json"
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.png"
+LANGUAGE_CONFIG_PATH = Path.home() / ".config" / "clickyclick" / "language.json"
 
 
 class ClickyClickApp:
@@ -45,6 +47,7 @@ class ClickyClickApp:
         self.root.resizable(False, False)
         self._icon_image = tk.PhotoImage(file=str(ICON_PATH))
         self.root.iconphoto(True, self._icon_image)
+        self.language = self._load_language()
 
         self._stop_event = threading.Event()
         self._click_thread = None
@@ -92,6 +95,31 @@ class ClickyClickApp:
         if self._backend_error:
             self.root.after(200, self._show_backend_error)
 
+    def _load_language(self):
+        try:
+            value = json.loads(LANGUAGE_CONFIG_PATH.read_text(encoding="utf-8")).get("language", "EN")
+            return value if value in LANGUAGES else "EN"
+        except (OSError, ValueError, AttributeError):
+            return "EN"
+
+    def _t(self, key):
+        return translate(self.language, key)
+
+    def _change_language(self, _event=None):
+        language = self._language_var.get()
+        if language not in LANGUAGES:
+            return
+        self.language = language
+        LANGUAGE_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LANGUAGE_CONFIG_PATH.write_text(json.dumps({"language": language}, indent=2) + "\n", encoding="utf-8")
+        if self._settings_open():
+            self._settings_win.destroy()
+            self._settings_win = None
+        for child in self.root.winfo_children():
+            child.destroy()
+        self.status_var.set(self._t("idle"))
+        self._build_ui()
+
     # ---------- state ----------
     def _build_vars(self):
         self.hours = tk.StringVar(value="0")
@@ -119,7 +147,7 @@ class ClickyClickApp:
         main = ttk.Frame(self.root, padding=10)
         main.grid(row=0, column=0, sticky="nsew")
 
-        interval_frame = ttk.LabelFrame(main, text="Click Interval")
+        interval_frame = ttk.LabelFrame(main, text=self._t("interval"))
         interval_frame.grid(row=0, column=0, sticky="ew", **pad)
         for i, (label, var) in enumerate(
             [
@@ -132,7 +160,7 @@ class ClickyClickApp:
             ttk.Label(interval_frame, text=label).grid(row=0, column=2 * i, padx=(6, 2), pady=6)
             ttk.Entry(interval_frame, textvariable=var, width=6).grid(row=0, column=2 * i + 1, padx=(0, 6))
 
-        options_frame = ttk.LabelFrame(main, text="Click Options")
+        options_frame = ttk.LabelFrame(main, text=self._t("options"))
         options_frame.grid(row=1, column=0, sticky="ew", **pad)
         ttk.Label(options_frame, text="Button:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         for i, val in enumerate(["left", "right", "middle"]):
@@ -145,12 +173,12 @@ class ClickyClickApp:
                 row=1, column=i + 1, padx=4, sticky="w"
             )
 
-        pos_frame = ttk.LabelFrame(main, text="Click Location")
+        pos_frame = ttk.LabelFrame(main, text=self._t("location"))
         pos_frame.grid(row=2, column=0, sticky="ew", **pad)
         ttk.Radiobutton(
-            pos_frame, text="Current cursor position", value="current", variable=self.position_mode
+            pos_frame, text=self._t("current"), value="current", variable=self.position_mode
         ).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=2)
-        ttk.Radiobutton(pos_frame, text="Fixed position:", value="fixed", variable=self.position_mode).grid(
+        ttk.Radiobutton(pos_frame, text=self._t("fixed"), value="fixed", variable=self.position_mode).grid(
             row=1, column=0, sticky="w", padx=6, pady=2
         )
         ttk.Entry(pos_frame, textvariable=self.fixed_x, width=6).grid(row=1, column=1)
@@ -160,10 +188,10 @@ class ClickyClickApp:
             row=2, column=0, columnspan=4, sticky="w", padx=6
         )
 
-        repeat_frame = ttk.LabelFrame(main, text="Repeat")
+        repeat_frame = ttk.LabelFrame(main, text=self._t("repeat"))
         repeat_frame.grid(row=3, column=0, sticky="ew", **pad)
         ttk.Radiobutton(
-            repeat_frame, text="Repeat until stopped", value="until_stopped", variable=self.repeat_mode
+            repeat_frame, text=self._t("until_stopped"), value="until_stopped", variable=self.repeat_mode
         ).grid(row=0, column=0, sticky="w", padx=6, pady=2)
         ttk.Radiobutton(repeat_frame, text="Repeat", value="count", variable=self.repeat_mode).grid(
             row=1, column=0, sticky="w", padx=6, pady=2
@@ -178,10 +206,10 @@ class ClickyClickApp:
 
         btn_frame = ttk.Frame(main)
         btn_frame.grid(row=5, column=0, sticky="ew", **pad)
-        self.toggle_btn = ttk.Button(btn_frame, text="Start", command=self._toggle_start_stop)
+        self.toggle_btn = ttk.Button(btn_frame, text=self._t("start"), command=self._toggle_start_stop)
         self.toggle_btn.grid(row=0, column=0, padx=4, sticky="ew")
-        ttk.Button(btn_frame, text="Settings…", command=self._open_settings).grid(row=0, column=1, padx=4, sticky="ew")
-        ttk.Button(btn_frame, text="Stop All", command=self._stop_all).grid(row=0, column=2, padx=4, sticky="ew")
+        ttk.Button(btn_frame, text=self._t("settings"), command=self._open_settings).grid(row=0, column=1, padx=4, sticky="ew")
+        ttk.Button(btn_frame, text=self._t("stop_all"), command=self._stop_all).grid(row=0, column=2, padx=4, sticky="ew")
         btn_frame.columnconfigure((0, 1, 2), weight=1)
 
         # In-window convenience bindings; the same physical action (button or
@@ -395,7 +423,7 @@ class ClickyClickApp:
         self._stop_event.clear()
         self._running = True
         self.status_var.set("Running")
-        self.toggle_btn.config(text="Stop")
+        self.toggle_btn.config(text=self._t("stop"))
         self.count_var.set("Clicks: 0")
 
         self._click_thread = threading.Thread(target=self._click_loop, args=(cfg,), daemon=True)
@@ -435,7 +463,7 @@ class ClickyClickApp:
                 elif kind == "stopped":
                     self._running = False
                     self.status_var.set("Idle")
-                    self.toggle_btn.config(text="Start")
+                    self.toggle_btn.config(text=self._t("start"))
                 elif kind == "toggle":
                     self._toggle_start_stop()
                 elif kind == "macro_step":
@@ -471,16 +499,24 @@ class ClickyClickApp:
         notebook = ttk.Notebook(win)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
 
+        language_frame = ttk.Frame(win, padding=(12, 8))
+        language_frame.pack(fill="x", before=notebook)
+        ttk.Label(language_frame, text=self._t("language")).pack(side="left")
+        self._language_var = tk.StringVar(value=self.language)
+        language_box = ttk.Combobox(language_frame, textvariable=self._language_var, values=list(LANGUAGES), width=6, state="readonly")
+        language_box.pack(side="left", padx=8)
+        language_box.bind("<<ComboboxSelected>>", self._change_language)
+
         hotkey_tab = ttk.Frame(notebook, padding=12)
-        notebook.add(hotkey_tab, text="Hotkey")
+        notebook.add(hotkey_tab, text=self._t("hotkey"))
         self._build_hotkey_tab(hotkey_tab)
 
         macros_tab = ttk.Frame(notebook, padding=12)
-        notebook.add(macros_tab, text="Macros")
+        notebook.add(macros_tab, text=self._t("macros"))
         self._build_macros_tab(macros_tab)
 
         about_tab = ttk.Frame(notebook, padding=12)
-        notebook.add(about_tab, text="About")
+        notebook.add(about_tab, text=self._t("about"))
         self._build_about_tab(about_tab)
 
     # ---- Hotkey tab ----
