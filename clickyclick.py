@@ -158,6 +158,9 @@ class ClickyClickApp:
 
     # ---------- main window UI ----------
     def _build_ui(self):
+        if self.steamos_mode:
+            self._build_handheld_ui()
+            return
         pad = {"padx": 8, "pady": 6}
         main = ttk.Frame(self.root, padding=10)
         main.grid(row=0, column=0, sticky="nsew")
@@ -236,6 +239,49 @@ class ClickyClickApp:
         # Settings does the same thing regardless of window focus.
         self.root.bind("<F6>", lambda ev: self._toggle_start_stop())
         self.root.bind("<Escape>", lambda ev: self._stop_all())
+
+    def _build_handheld_ui(self):
+        self.root.title("ClickyClick — SteamOS")
+        self.root.geometry("960x650")
+        self.root.resizable(True, True)
+        c = {"bg": "#071b24", "panel": "#0b2a35", "line": "#20c8d4", "text": "#f4fbfd", "muted": "#9db9c2", "green": "#087843", "red": "#8f2630", "blue": "#075e91", "yellow": "#77610b"}
+        panel = tk.Frame(self.root, bg=c["bg"], highlightbackground=c["line"], highlightthickness=2)
+        panel.pack(fill="both", expand=True, padx=8, pady=8)
+        header = tk.Frame(panel, bg=c["bg"])
+        header.pack(fill="x", padx=28, pady=(20, 10))
+        tk.Label(header, text="∞", font=("", 34, "bold"), fg="#35e4e9", bg=c["bg"]).pack(side="left")
+        tk.Label(header, text="ClickyClick", font=("", 23, "bold"), fg=c["text"], bg=c["bg"]).pack(side="left", padx=12)
+        controller_text = "Controller connected" if self.controllers else "Controller not detected"
+        tk.Label(header, text="●", font=("", 14), fg="#22e28b" if self.controllers else "#e4ad38", bg=c["bg"]).pack(side="left", padx=(28, 5))
+        tk.Label(header, text=controller_text, font=("", 12, "bold"), fg=c["muted"], bg=c["bg"]).pack(side="left")
+        self._language_var = tk.StringVar(value=self.language)
+        language_box = ttk.Combobox(header, textvariable=self._language_var, values=list(LANGUAGES), width=5, state="readonly")
+        language_box.pack(side="right")
+        language_box.bind("<<ComboboxSelected>>", self._change_language)
+        status_card = tk.Frame(panel, bg=c["panel"], highlightbackground="#1d7182", highlightthickness=1)
+        status_card.pack(fill="x", padx=28, pady=(0, 12))
+        tk.Label(status_card, text="AUTOCLICKER", font=("", 13, "bold"), fg=c["muted"], bg=c["panel"]).pack(pady=(10, 0))
+        tk.Label(status_card, textvariable=self.status_var, font=("", 27, "bold"), fg=c["text"], bg=c["panel"]).pack(pady=(0, 10))
+        actions = tk.Frame(panel, bg=c["bg"])
+        actions.pack(fill="both", expand=True, padx=23)
+        for column in (0, 1):
+            actions.columnconfigure(column, weight=1, uniform="actions")
+        actions.rowconfigure((0, 1), weight=1, uniform="actions")
+        self._handheld_action(actions, 0, 0, "A", self._t("start"), c["green"], self._toggle_start_stop)
+        self._handheld_action(actions, 0, 1, "B", self._t("stop"), c["red"], self._stop_all)
+        self._handheld_action(actions, 1, 0, "X", "Record Macro", c["blue"], self._toggle_game_recording)
+        self._handheld_action(actions, 1, 1, "Y", "Play Macro", c["yellow"], self._toggle_macro_hotkey)
+        details = tk.Frame(panel, bg=c["bg"])
+        details.pack(fill="x", padx=28, pady=10)
+        tk.Label(details, text=f"◷  Interval   {self.millis.get()} ms", font=("", 13, "bold"), fg=c["text"], bg=c["panel"], padx=18, pady=12).pack(side="left", expand=True, fill="x", padx=(0, 5))
+        macro_name = self.macro_hotkey_name or "—"
+        tk.Label(details, text=f"↻  Macro   {macro_name}", font=("", 13, "bold"), fg="#35e4e9", bg=c["panel"], padx=18, pady=12).pack(side="left", expand=True, fill="x", padx=(5, 0))
+        tk.Button(panel, text="⚠  Hold Back/View + Y — STOP ALL", command=self._stop_all, font=("", 14, "bold"), fg="white", bg=c["red"], activebackground="#b9323e", activeforeground="white", relief="flat", bd=0, pady=12).pack(fill="x", padx=28, pady=(0, 20))
+        self.root.bind("<Escape>", lambda ev: self._stop_all())
+
+    @staticmethod
+    def _handheld_action(parent, row, column, badge, label, color, command):
+        tk.Button(parent, text=f"{badge}     {label}", command=command, font=("", 18, "bold"), fg="white", bg=color, activebackground=color, activeforeground="white", relief="flat", bd=0, padx=20, pady=20).grid(row=row, column=column, sticky="nsew", padx=5, pady=5)
 
     # ---------- signal / hotkey plumbing ----------
     def _install_signal_handlers(self):
