@@ -203,3 +203,21 @@ ClickyClick is free and open-source software licensed under the
 study, modify, and redistribute it under the terms of that license.
 
 Copyright © 2026 Darius Kazlauskas.
+
+## Where the code lives
+
+`dariuskazz/ClickyClick`, public, GPL-3.0:
+
+| branch | for |
+|---|---|
+| `main` | the released line |
+| `linux` | desktop Linux work |
+| `steamos` | Game Mode and handheld UI work |
+
+The Windows build lives in a separate private repository,
+`dariuskazz/ClickyClick-Windows`. It is not a port of this code: it is a
+rewrite with a different shape — a `clickyclick/` package with a
+`pyproject.toml`, against the flat modules here — and the two have no shared
+history. Folding it in would mean publishing it, and unifying it properly would
+mean one codebase deciding at runtime which system it is on, the way
+`vyshnya/platform.py` does. Neither has been done, deliberately.
